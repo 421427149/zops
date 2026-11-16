@@ -15,8 +15,9 @@
         ],
         "on_value": 1,
         "off_value": 0,
-        "discharge_s": 20,
-        "note": "libgpiod gpioset exit 模式设完即复位必须用 sysfs; GPIO 释放态(T536 重启)=断电; 单路归属未定位, 4 路同值操作"
+        "discharge_s": 6,
+        "note": "libgpiod gpioset exit 模式设完即复位必须用 sysfs; GPIO 释放态(T536 重启)=断电; 单路归属未定位, 4 路同值操作",
+        "discharge_note": "2026-11-16 实测: 断电 3s 后上电即可冷启动(DDR 横幅 1.5s 出现), 取 2 倍余量=6s; 旧值 20/25s 来自保守经验值, 冷启动/救砖共用本参数"
       }
     },
     "target": {
@@ -83,8 +84,9 @@
         "channel": "12V5",
         "on_value": 1,
         "off_value": 0,
-        "discharge_s": 25,
-        "note": "2026-11-13 固件已升级为 JSON V3.5(行协议): {\"ch\":\"5V2\",\"st\":1} 控制, {\"qr\":\"通道\"} 可查询(返回 code/mode/st/cnt/tot); 通道名 USB0/USB1/5V2/5V3/12V4/12V5/RST_USB。旧 A5 二进制协议仍保留兼容(rigctl 自动探测)。坑: 裸 ON 无边沿不生效(OFF→放电≥25s→ON); 扩展坞/板卡上的 USB 口供电走 USB0/USB1, 上电顺序先 USB 再板卡电源。 ※usb_port_channel 置 null: 该板 12V5 单路即可, 且旧 A5 整数通道在新协议下非法"
+        "discharge_s": 6,
+        "note": "2026-11-13 固件已升级为 JSON V3.5(行协议): {\"ch\":\"5V2\",\"st\":1} 控制, {\"qr\":\"通道\"} 可查询(返回 code/mode/st/cnt/tot); 通道名 USB0/USB1/5V2/5V3/12V4/12V5/RST_USB。旧 A5 二进制协议仍保留兼容(rigctl 自动探测)。坑: 裸 ON 无边沿不生效(OFF→放电≥25s→ON); 扩展坞/板卡上的 USB 口供电走 USB0/USB1, 上电顺序先 USB 再板卡电源。 ※usb_port_channel 置 null: 该板 12V5 单路即可, 且旧 A5 整数通道在新协议下非法",
+        "discharge_note": "2026-11-16 实测: 断电 3s 后上电即可冷启动(DDR 横幅 1.5s 出现), 取 2 倍余量=6s; 旧值 20/25s 来自保守经验值, 冷启动/救砖共用本参数"
       },
       "firmware_note": "2026-11-13 用户告知固件已升级(用户称 V5); 协议实测为 JSON V3.5 行协议"
     },
