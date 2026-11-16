@@ -317,14 +317,53 @@ def act_power(rig_name, rig, value, label):
         raise RigError(3, f"{rig_name} 的控制器控制台({console_chain_of_rig(rig, 'controller')}) "
                           "没有在线实例; 先起: serial_debug.py -p <by-path> -b 115200 --agent-http <port>")
     agent_port, _tab = hit
-    out = send_and_read(agent_port, power_cmdline(rig, value))
-    m = re.search(r"__PWR_RC=(\d+)__", out)
-    if not m:
-        raise RigError(4, f"控制台无 {label} 哨兵回显(尾窗: {out[-120:]!r}); "
-                          "检查控制台是否被占用/登录态")
-    if m.group(1) != "0":
-        raise RigError(4, f"{label} 命令 rc={m.group(1)} 非零, GPIO 写入可能失败")
-    print(f"{rig_name}: {label} 完成(GPIO 全写 {value}, 经实例 {agent_port})")
+    gpios = rig["controller"]["power"]["gpios"]
+    gs = " ".join(str(g) for g in gpios)
+    readback = (f"for g in {gs}; do echo -n \"$g:\"; "
+                f"cat /sys/class/gpio/gpio$g/value 2>/dev/null || echo NA; done; "
+                f"echo __GPIO_END__")
+    # rc=0 只说明循环跑完, 不代表继电器真到位 —— 必须回读电平(曾因此把板子留在断电态)
+    for attempt in range(1, 4):
+        out = send_and_read(agent_port, power_cmdline(rig, value))
+        m = re.search(r"__PWR_RC=(\d+)__", out)
+        if not m:
+            raise RigError(4, f"控制台无 {label} 哨兵回显(尾窗: {out[-120:]!r}); "
+                              "检查控制台是否被占用/登录态")
+        if m.group(1) != "0":
+            raise RigError(4, f"{label} 命令 rc={m.group(1)} 非零, GPIO 写入失败")
+        rb = send_and_read(agent_port, readback, settle=1.0)
+        vals = dict(re.findall(r"(\d+):([01])", rb))
+        wrong = {g: v for g, v in vals.items() if int(v) != int(value)}
+        if vals and not wrong:
+            print(f"{rig_name}: {label} 完成并回读确认(GPIO {gs} 全为 {value}, "
+                  f"第{attempt}次, 经实例 {agent_port})")
+            return
+        print(f"{rig_name}: {label} 第{attempt}次回读不符 {wrong or '无回读'}, 重试...",
+              flush=True)
+        time.sleep(0.5)
+    raise RigError(4, f"{label} 连续 3 次回读不到 GPIO={value} —— 继电器可能未到位, "
+                      f"板子当前可能仍处于断电态(请人工确认)")
+
+
+def _ensure_power_on(rig_name, rig):
+    """最终兜底: 确保板子处于通电态(失败重试 3 次)。
+
+    用途: 验证/冷启动/救砖等流程中间任何异常都不应把板子留在断电态
+    (实测踩过: 流程中途失败 → 板子断电, 用户以为"被搞死了")。
+    """
+    p = rig["controller"]["power"]
+    for i in range(3):
+        try:
+            act_power(rig_name, rig, p.get("on_value", 1), f"兜底上电(第{i+1}次)")
+            return True
+        except SystemExit as e:
+            print(f"[warn] {rig_name}: 兜底上电失败({e}), 重试", flush=True)
+            time.sleep(1)
+        except Exception as e:
+            print(f"[warn] {rig_name}: 兜底上电异常({e}), 重试", flush=True)
+            time.sleep(1)
+    print(f"[ERROR] {rig_name}: 无法恢复供电 —— 请人工确认板子电源!", flush=True)
+    return False
 
 
 def _lsusb():
@@ -641,69 +680,72 @@ def act_verify(rig_name, rig, rigs_path, all_rigs, only=None, recover=False):
     ch = p.get("channel")
     results = {}
     print(f"{rig_name}: 验证明细 ————————————————", flush=True)
+    try:
+      for act in acts:
+          ok, why = False, ""
+          try:
+              if act == "off":
+                  act_power(rig_name, rig, p.get("off_value", 0), "关机")
+                  st = _h503_state(rig, ch)
+                  ok = (st == 0) if st is not None else True
+                  why = f"通道回读 st={st}" if st is not None else "控制台 rc=0"
+              elif act == "on":
+                  act_power(rig_name, rig, p.get("on_value", 1), "开机")
+                  st = _h503_state(rig, ch)
+                  ok = (st == 1) if st is not None else True
+                  why = f"通道回读 st={st}" if st is not None else "控制台 rc=0"
+              elif act == "coldboot":
+                  before = _rx_of(rig) or 0
+                  act_power(rig_name, rig, p.get("off_value", 0), "关机")
+                  wait = int(p.get("discharge_s", 20))
+                  print(f"{rig_name}: 放电 {wait}s ...", flush=True)
+                  time.sleep(wait)
+                  act_power(rig_name, rig, p.get("on_value", 1), "开机")
+                  grew = 0
+                  for _ in range(20):
+                      time.sleep(2)
+                      now = _rx_of(rig)
+                      if now and now > before + 200:
+                          grew = now - before
+                          break
+                  ok = grew > 0
+                  why = f"串口新增 {grew} 字节(板子重启)" if ok else "40s 内串口无新增"
+              elif act == "enter-loader":
+                  act_enter_loader(rig_name, rig)
+                  ok = _usb_has("350b")
+                  why = "lsusb 2207:350b" if ok else \
+                      "未见 350b —— 若下载线未接主机则无法验证(命令本身可能已生效)"
+              elif act == "catch-uboot":
+                  act_catch_uboot(rig_name, rig, select_usb=True)
+                  ok = _usb_has("350b")
+                  why = "lsusb 2207:350b" if ok else \
+                      "未见 350b —— 该板 U-Boot 可能无 autoboot 倒计时(按键会直接落到 Linux shell)"
+              else:
+                  why = "未知动作"
+          except SystemExit as e:
+              why = f"失败: {e}"
+          except Exception as e:
+              why = f"异常: {e}"
+          results[act] = {"ok": ok, "at": time.strftime("%Y-%m-%d %H:%M"),
+                          "evidence": why}
+          print(f"  {'✔' if ok else '✘'} {act:<13} {why}", flush=True)
 
-    for act in acts:
-        ok, why = False, ""
-        try:
-            if act == "off":
+    finally:
+        if recover:
+            print(f"{rig_name}: 验证后恢复系统(冷启动回系统)...", flush=True)
+            try:
                 act_power(rig_name, rig, p.get("off_value", 0), "关机")
-                st = _h503_state(rig, ch)
-                ok = (st == 0) if st is not None else True
-                why = f"通道回读 st={st}" if st is not None else "控制台 rc=0"
-            elif act == "on":
+                time.sleep(int(p.get("discharge_s", 20)))
                 act_power(rig_name, rig, p.get("on_value", 1), "开机")
-                st = _h503_state(rig, ch)
-                ok = (st == 1) if st is not None else True
-                why = f"通道回读 st={st}" if st is not None else "控制台 rc=0"
-            elif act == "coldboot":
-                before = _rx_of(rig) or 0
-                act_power(rig_name, rig, p.get("off_value", 0), "关机")
-                wait = int(p.get("discharge_s", 20))
-                print(f"{rig_name}: 放电 {wait}s ...", flush=True)
-                time.sleep(wait)
-                act_power(rig_name, rig, p.get("on_value", 1), "开机")
-                grew = 0
-                for _ in range(20):
-                    time.sleep(2)
-                    now = _rx_of(rig)
-                    if now and now > before + 200:
-                        grew = now - before
-                        break
-                ok = grew > 0
-                why = f"串口新增 {grew} 字节(板子重启)" if ok else "40s 内串口无新增"
-            elif act == "enter-loader":
-                act_enter_loader(rig_name, rig)
-                ok = _usb_has("350b")
-                why = "lsusb 2207:350b" if ok else \
-                    "未见 350b —— 若下载线未接主机则无法验证(命令本身可能已生效)"
-            elif act == "catch-uboot":
-                act_catch_uboot(rig_name, rig, select_usb=True)
-                ok = _usb_has("350b")
-                why = "lsusb 2207:350b" if ok else \
-                    "未见 350b —— 该板 U-Boot 可能无 autoboot 倒计时(按键会直接落到 Linux shell)"
-            else:
-                why = "未知动作"
-        except SystemExit as e:
-            why = f"失败: {e}"
-        except Exception as e:
-            why = f"异常: {e}"
-        results[act] = {"ok": ok, "at": time.strftime("%Y-%m-%d %H:%M"),
-                        "evidence": why}
-        print(f"  {'✔' if ok else '✘'} {act:<13} {why}", flush=True)
+                print(f"{rig_name}: 已上电, 板子开始启动", flush=True)
+            except SystemExit as e:
+                print(f"{rig_name}: 恢复失败: {e}", flush=True)
+            _ensure_power_on(rig_name, rig)      # 无论如何保证通电
+        else:
+            _ensure_power_on(rig_name, rig)      # 验证完也不许留断电
 
     rig.setdefault("verified", {}).update(results)
     save_rigs(rigs_path, all_rigs)
-
-    if recover:
-        print(f"{rig_name}: 验证后恢复系统(coldboot)...", flush=True)
-        try:
-            act_power(rig_name, rig, p.get("off_value", 0), "关机")
-            time.sleep(int(p.get("discharge_s", 20)))
-            act_power(rig_name, rig, p.get("on_value", 1), "开机")
-            print(f"{rig_name}: 已上电, 板子开始启动", flush=True)
-        except SystemExit as e:
-            print(f"{rig_name}: 恢复失败: {e}", flush=True)
-
     passed = sum(1 for v in results.values() if v["ok"])
     print(f"{rig_name}: {passed}/{len(results)} 项通过, 结果已写入 rigs.json", flush=True)
 

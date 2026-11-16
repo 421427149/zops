@@ -34,7 +34,10 @@
    = 全程零字节。静默 ≠ 线断 ≠ 没电。
 7. **实例账本疑死先做活性采样**：两次 `/api/info` 采 `capture_bytes`，不涨 = 大概率
    设备重插后旧实例持死 fd，重启实例（用 by-path）而不是对着冻死账本下结论。
-8. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
+8. **电源类操作必须以"回读"为准，不信命令返回值**：GPIO 写完要回读
+   `/sys/class/gpio/gpioN/value`，H503 要回读通道 `st`。只检查命令 rc=0 会把板子
+   留在断电态（实测踩过）。任何流程中途失败，必须 `_ensure_power_on` 兜底。
+9. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
    （`logs/hub_audit.jsonl`，主人用 `hub_audit_view.py` 实时围观）；直连 832x =
    绕开审计，等同私读。
 
@@ -61,6 +64,7 @@ serial-audit(审计镜像)。hub 常驻检查: `curl -s http://127.0.0.1:8300/ap
 ## 自检（改码后必跑对应项再提交）
 
 ```bash
+python3 check_code.py             # 语法 + 重复定义 + 拼接事故 + 内嵌JS  (改任何 py 后必跑)
 python3 test_agent_http.py        # 20 项, 自包含不碰真设备
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
