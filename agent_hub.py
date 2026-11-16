@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.0"
+HUB_VERSION = "3.1"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -467,6 +467,17 @@ class Hub:
                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "rigctl.py"),
                    name, action]
             lines = []
+            # 执行前先确认 rigctl.py 能编译: 曾经编辑到一半时按钮被点, 子进程直接
+            # SyntaxError 崩掉, 用户只看到"按钮没反应"。给个明确提示。
+            rigctl_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rigctl.py")
+            try:
+                import py_compile as _pc
+                _pc.compile(rigctl_py, doraise=True, cfile="/tmp/_zops_rigctl.pyc")
+            except Exception as e:
+                self._rig_out[name] = (time.strftime("%H:%M:%S ")
+                                       + f"[{action}] ✘ rigctl.py 当前无法编译({e}); "
+                                         f"先跑 python3 check_code.py 修复")
+                return
             try:
                 with self._rig_lock:
                     # 逐行读子进程输出并实时更新状态条: 冷启动有 25s 放电静默期,
