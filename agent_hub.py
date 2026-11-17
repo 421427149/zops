@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.1"
+HUB_VERSION = "3.2"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -450,7 +450,7 @@ class Hub:
             out.append(entry)
         return out
 
-    def rigs_action(self, name, action):
+    def rigs_action(self, name, action, src="agent"):
         """网页电源动作: 后台线程执行 rigctl 动作, 输出存 _rig_out 供状态条回显。"""
         R = self._rig_mod()
         rigs = R.load_rigs(self._rigs_path())
@@ -458,6 +458,28 @@ class Hub:
             raise AgentApiError(404, f"无组合 {name!r}(现有: {', '.join(rigs)})")
         if action not in ("on", "off", "coldboot", "enter-loader", "catch-uboot"):
             raise AgentApiError(400, f"未知动作 {action!r}")
+
+        def _audit_rig(tag, detail=""):
+            """电源动作落审计账: 谁在何时对哪个组合按了什么、结果如何。
+
+            此前电源动作不进审计(只记串口读写), 出过'用户说按了冷启动但板子
+            没反应'却无从查证是否到达网关的盲区(2026-11-17 实测教训)。"""
+            if not self.audit_path:
+                return
+            try:
+                import json as _j
+                rec = {"t": time.strftime("%H:%M:%S"), "board": f"rig:{name}",
+                       "dev": "power", "action": action, "status": 0,
+                       "src": src, "tag": tag}
+                if detail:
+                    rec["detail"] = detail[:200]
+                with self._audit_lock:
+                    with open(self.audit_path, "a", encoding="utf-8") as f:
+                        f.write(_j.dumps(rec, ensure_ascii=False) + "\n")
+            except Exception as e:
+                print(f"[hub] 电源动作审计失败: {e}", flush=True)   # 不再静默吞
+
+        _audit_rig("accepted")
 
         def worker():
             # 子进程执行 rigctl: 彻底隔离输出——redirect_stdout 是进程全局,
@@ -501,6 +523,7 @@ class Hub:
                 lines.append(f"[异常] {e}")
             tail = " ⟶ ".join(lines[-3:]) if lines else "(无输出)"
             self._rig_out[name] = time.strftime("%H:%M:%S ") + f"[{action}] " + tail
+            _audit_rig("done", tail)
 
         threading.Thread(target=worker, daemon=True).start()
         return {"started": True, "rig": name, "action": action}
@@ -642,7 +665,8 @@ class _Handler(BaseHTTPRequestHandler):
             return 200, False, {"rigs": hub.rigs_status()}
         if seg[1] == "rigs" and len(seg) == 4:
             self._need(method, "POST")
-            return 200, False, hub.rigs_action(seg[2], seg[3])
+            return 200, False, hub.rigs_action(
+                seg[2], seg[3], src=self.headers.get("X-Hub-Src", "agent"))
         if seg[1] == "audit" and len(seg) == 2:
             self._need(method, "GET")
             n = int(parse_qs(query).get("n", ["30"])[0])   # query 是原始串(proxy 要原样转发)
