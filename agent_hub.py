@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.2"
+HUB_VERSION = "3.3"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -763,6 +763,9 @@ UI_HTML = r"""<!DOCTYPE html>
  <span style="color:#4a5568;font-size:11px;margin-left:8px">hub v2.3</span></div>
 <div id="rigs">rig 状态条加载中…</div>
 <div id="term"></div>
+<div id="lock" style="display:none;position:fixed;left:50%;transform:translateX(-50%);
+ bottom:14px;background:#2d2a1e;border:1px solid #d29922;color:#d8b466;border-radius:7px;
+ padding:5px 14px;font:12px Consolas,monospace;cursor:pointer;z-index:9"></div>
 <div id="ai">AI 活动条</div>
 <script src="/static/xterm.js"></script>
 <script src="/static/fit.js"></script>
@@ -805,6 +808,22 @@ function note2(){const t=tabs.find(x=>x.index===active);
  return t?(t.title+(t.open?'':' (串口未开)')):''}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let errStreak=0;
+let follow=true;          // 跟随滚动: 选中文字/上翻时暂停, 防洪水把选区冲走
+function emit(tab,txt){  // 唯一写屏入口: 冻结时只积压, 恢复时补写(账本照收不丢)
+ const s=state[tab]; if(!s)return;
+ if(follow&&active===tab){term.write(txt);setFollowChip()}
+ else{s.pending=(s.pending||'')+txt;
+  if(s.pending.length>600000)s.pending=s.pending.slice(-400000);
+  setFollowChip()}}
+function resumeFollow(){ if(follow)return; follow=true;
+ for(const k in state){const s=state[k];
+  if(s&&s.pending){let t=s.pending;s.pending='';
+   if(t.length>250000){term.write('\x1b[90m⟦…冻结期积压已截断, 完整内容在磁盘账本⟧\x1b[0m\r\n');t=t.slice(-250000)}
+   if(k==active)term.write(t)}}
+ term.scrollToBottom();setFollowChip();term.focus()}
+function setFollowChip(){ $('lock').style.display=follow?'none':'block';
+ if(!follow){const s=state[active];const n=(s&&s.pending)?s.pending.length:0;
+  $('lock').textContent='⏸ 已暂停跟随(选择中'+(n?',积压'+n+'B':'')+') — Esc/点此恢复'} }
 async function streamLoop(){while(true){
  if(active===null||document.hidden){await sleep(300);continue}
  const tab=active,s=state[tab];          // 固定本轮所属 tab, 防切页后写错画面
@@ -814,7 +833,7 @@ async function streamLoop(){while(true){
   try{const d=await jget(`/api/tabs/${tab}/receive?tail=1&max_bytes=4000`);
    if(d.bytes>0){const mark='\r\n\x1b[90m⟦串口通道已重连, 已同步到最新⟧\x1b[0m\r\n';
     s.buf+=mark.replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'')+d.text;
-    if(show())term.write(mark+d.text);
+    if(show())emit(tab,mark+d.text);
     if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
    s.off=d.next_offset;s.err=0}
   catch(e){await sleep(800)}
@@ -822,8 +841,10 @@ async function streamLoop(){while(true){
  const t0=Date.now();
  try{const d=await jget(`/api/tabs/${tab}/receive?offset=${s.off}&max_bytes=16384&wait_ms=400`);
   if(d.bytes>0){s.buf+=d.text;
+   if(/\x1b\[\?2004h/.test(d.text))s.brl=true;      // 板端 shell 开了 bracketed-paste
+   if(/\x1b\[\?2004l/.test(d.text))s.brl=false;
    if(s.buf.length>200000)s.buf=s.buf.slice(-150000);
-   if(show())term.write(d.text)}      // 只画当前页; 别的 tab 数据留在 buf, 切回时重绘
+   if(show())emit(tab,d.text)}      // 只画当前页; 别的 tab 数据留在 buf, 切回时重绘
   s.off=d.next_offset;s.err=0;
   if(Date.now()-t0<100&&d.bytes===0)await sleep(150)   // 旧实例不认 wait_ms, 防空转
  }catch(e){
@@ -855,6 +876,68 @@ function lineKey(d){const s=state[active];
   else if(ch==='\x7f'){if(line){line=line.slice(0,-1);term.write('\b \b')}}
   else if(ch==='\x03'){line='';term.write('^C\r\n')}
   else if(ch>=' '||ch==='\t'){line+=ch;term.write(ch)}}}
+// ---- 复制/粘贴四件套 (http 局域网无 navigator.clipboard, 用 execCommand 兜底) ----
+let lastPaste='';                                   // 右键重发用(非安全上下文读不了剪贴板)
+function copyText(text){
+ if(navigator.clipboard&&window.isSecureContext){
+  navigator.clipboard.writeText(text).then(()=>note('已复制 '+text.length+' 字'),()=>note('复制失败'));
+  return}
+ const ta=document.createElement('textarea');ta.value=text;
+ ta.style.cssText='position:fixed;opacity:0;top:0;left:0';
+ document.body.appendChild(ta);ta.focus();ta.select();
+ try{document.execCommand('copy');note('已复制 '+text.length+' 字')}
+ catch(e){note('复制失败: 浏览器拦截, 请右键手动复制')}
+ ta.remove();term.focus()}
+async function smartPaste(text){
+ if(active===null||!text)return;
+ lastPaste=text;
+ const s=state[active];
+ text=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+ const lines=text.split('\n');
+ if(lines.length===1){                              // 单行: 原样进板端行编辑, 不自动执行
+  if(raw){rawSend(text);note('已粘贴单行(未执行, 回车才生效)')}
+  else{for(const ch of text)lineKey(ch)}
+  return}
+ // 多行: 板端支持 bracketed-paste(bash 提示符带 2004h)则整块包裹, 不然逐行限速
+ if(raw&&s&&s.brl){
+  if(text.length>4096&&!confirm('粘贴 '+text.length+' 字到板子, 确认?'))return;
+  rawSend('\x1b[2004~'+text+'\x1b[2014~');
+  note('已粘贴 '+lines.length+' 行(bracketed, 整块进板端, 回车才执行)');return}
+ if(lines.length>6||text.length>2048){
+  if(!confirm('将逐行发送 '+lines.length+' 行到板子(每行都会执行), 确认?'))return}
+ note('逐行粘贴 '+lines.length+' 行(70ms/行, 防灌爆 UART)…');
+ for(let i=0;i<lines.length;i++){
+  const ln=lines[i];
+  if(raw){if(ln)rawSend(ln);rawSend('\r')}
+  else{lineKey('\r')}                              // 行模式旧实例: 只喂回车示意
+  await sleep(70)}
+ note('粘贴完成')}
+term.attachCustomKeyEventHandler(ev=>{
+ if(ev.type!=='keydown')return true;
+ const sel=()=>term.getSelection();
+ if(ev.key==='c'&&ev.ctrlKey&&!ev.shiftKey){        // Ctrl+C: 有选区=复制, 无=中断板子
+  if(sel()){copyText(sel());ev.preventDefault();return false}
+  return true}
+ if(ev.key==='C'&&ev.ctrlKey&&ev.shiftKey){         // Ctrl+Shift+C: 无条件复制
+  if(sel()){copyText(sel())}ev.preventDefault();return false}
+ if(ev.key==='Escape'){                            // Esc: 丢选区+恢复跟随
+  term.clearSelection();resumeFollow();return true}
+ return true});
+term.element.addEventListener('mousedown',()=>{follow=false});   // 开始选择即冻结
+term.element.addEventListener('mouseup',()=>{setTimeout(()=>{
+ if(!term.getSelection()&&follow===false&&!selectHold)resumeFollow()},60)});
+let selectHold=false;
+term.onSelectionChange(()=>{selectHold=!!term.getSelection();setFollowChip()});
+term.element.addEventListener('contextmenu',ev=>{    // 右键: 有选区=复制, 无=粘贴上一次
+ ev.preventDefault();
+ const t=term.getSelection();
+ if(t){copyText(t);term.clearSelection();return}
+ if(lastPaste){smartPaste(lastPaste)}
+ else note('右键粘贴需先 Ctrl+V 过一次(局域网 http 读不了剪贴板)')});
+window.addEventListener('paste',ev=>{                 // Ctrl+V 统一走安全粘贴
+ if(active===null)return;
+ const t=(ev.clipboardData||window.clipboardData).getData('text/plain');
+ if(!t)return;ev.preventDefault();smartPaste(t)});
 term.onData(d=>{if(active===null)return;
  if(raw){rawSend(d)}else{lineKey(d)}});
 const TL=[   // AI 命令人话翻译规则(首条命中即用, $1..$9=正则分组); 想加词在这补一行
@@ -976,6 +1059,7 @@ async function pollAI(){try{const d=await jget('/api/audit?n=30');
  catch(e){}}
 $('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
 $('rigs').ondblclick=()=>$('rigs').classList.toggle('folded');
+$('lock').onclick=()=>{term.clearSelection();resumeFollow()};
 new ResizeObserver(()=>{try{fit.fit()}catch(e){}}).observe($('rigs'));
 new ResizeObserver(()=>{try{fit.fit()}catch(e){}}).observe($('term'));
 setInterval(pollTabs,3000);setInterval(pollAI,2500);setInterval(pollRigs,5000);
