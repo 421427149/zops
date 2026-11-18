@@ -21,7 +21,7 @@
       }
     },
     "target": {
-      "name": "TQ3588",
+      "name": "3588 A",
       "console": "1.4.3",
       "baud": 1500000,
       "adb_serial": "7a0aab8c51b5474a",
@@ -91,7 +91,7 @@
       "firmware_note": "2026-11-13 用户告知固件已升级(用户称 V5); 协议实测为 JSON V3.5 行协议"
     },
     "target": {
-      "name": "TQ3588-8988",
+      "name": "3588 B",
       "console": "1.2",
       "baud": 1500000,
       "enter_loader_cmd": "reboot loader",
