@@ -16,6 +16,7 @@
                                #   --only off,on 只验部分; --recover 验完冷启动回系统
     rigctl rig-A catch-uboot   # 救砖: 冷启动+连发Ctrl+C抓U-Boot菜单+选[3]进Loader
                                #   (内核已panic时唯一入口; 加 --menu 停在菜单不选)
+    rigctl rig-A bind-dl       # 绑定USB下载口(断电差分), 会开USB口通道并重启板子
     rigctl rig-A bind          # 重探测受控板: 关电盯哪个串口灭→开电盯哪个醒,
                                # 结论自动写回 rigs.json 的 target(换板/挪线后跑这个)
     rigctl --selftest          # 链路归一化自检, 不碰设备
@@ -459,12 +460,52 @@ def _adb_devices_l():
         return ""
 
 
+def _rk_usb_by_chain():
+    """枚举总线上全部 Rockchip(2207) 设备: {链路段: {"pid","serial"}}。
+
+    链路段从 sysfs 设备名换算(3-1.3.1.2 → "1.3.1.2"), 与 by-path/adb 的链路
+    坐标系同源——判定"哪个口的 2207 是哪块板"从此精确到物理口, 不再类型级
+    扫 lsusb(曾因此被 SSI_17 冒充)。
+    """
+    out = {}
+    try:
+        names = os.listdir("/sys/bus/usb/devices")
+    except OSError:
+        return out
+    for name in names:
+        if "-" not in name or ":" in name:      # 跳过接口级条目(3-1.2:1.0)
+            continue
+        base = f"/sys/bus/usb/devices/{name}"
+        try:
+            if open(f"{base}/idVendor").read().strip() != "2207":
+                continue
+            pid = open(f"{base}/idProduct").read().strip().lower()
+            try:
+                sn = open(f"{base}/serial").read().strip()
+            except OSError:
+                sn = ""
+        except OSError:
+            continue
+        chain = name.split("-", 1)[1]           # 3-1.3.1.2 → 1.3.1.2
+        out[chain] = {"pid": pid, "serial": sn}
+    return out
+
+
 def usb_mode_for(rig):
     """判定受控板下载口模式——以 adb 序列号认主, 杜绝总线上其他 2207 设备污染判定
     (2026-11-08 实训: SSI_17 设备占 2207:0006, 曾让 rig-A 被误判为运行态)。
     运行态: adb devices -l 按序列号匹配(链路一并报出); Loader/MaskROM: adb 不列,
     扫 lsusb 的 350b/320b(需下载线接主机才可见, 无 upgrade_tool 时按 PID 口诀)。"""
-    adb_serial = (rig.get("target") or {}).get("adb_serial", "")
+    tgt = rig.get("target") or {}
+    dl = tgt.get("download_chain")
+    if dl:                                        # 已绑定下载口: 直接看这个物理口
+        dev = _rk_usb_by_chain().get(dl)
+        if not dev:
+            return None                           # 口上无 2207(线未插/USB口通道未供电)
+        pid = dev["pid"]
+        extra = f", serial={dev['serial'][:12]}" if dev["serial"] else ""
+        return f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}{extra} @下载口{dl}"
+    adb_serial = tgt.get("adb_serial", "")
     if adb_serial:
         for line in _adb_devices_l().splitlines():
             if adb_serial in line:
@@ -664,6 +705,76 @@ def _rx_of(rig):
 def _usb_has(pid):
     return any(x.lower() == pid.lower()
                for x in re.findall(r"2207:([0-9a-f]{4})", _lsusb(), re.I))
+
+
+def act_bind_download(rig_name, rig, rigs_path, all_rigs):
+    """绑定受控板的 USB 下载口(烧录口): 断电差分, 结论写回 rigs.json/boards.json。
+
+    原理: 先确保 H503 的 USB 口通道供电(下载线多半插在那里), 快照全部 2207 设备
+    (按物理链路); 断板子电 6s 再快照——**消失的那个口**就是本板下载口; 上电等它
+    回来并记录 PID/serial。绑定后 usb_mode_for 精确到口, 不再被别的 RK 板冒充。
+    """
+    ctrl = rig.get("controller") or {}
+    p = ctrl.get("power") or {}
+    method = str(p.get("method", ""))
+    usb_ch = ctrl.get("usb_port_channel")
+    cmd_port = ctrl.get("cmd_port")
+    if not method.startswith("h503"):
+        raise RigError(3, "bind-dl 目前只支持 h503 电源板组合(GPIO 治具无 USB 口通道)")
+    if not p.get("channel"):
+        raise RigError(3, "电源通道未绑定, 先跑 bind")
+    if usb_ch:
+        h503_power(cmd_port, usb_ch, 1, h503_detect(cmd_port)[0] or "json-v3.5")
+        print(f"{rig_name}: 已开 USB 口通道 {usb_ch}(下载线供电)", flush=True)
+        time.sleep(3)
+
+    before = _rk_usb_by_chain()
+    if before:
+        print(f"{rig_name}: 当前 2207 设备: "
+              f"{ {k: v['pid'] for k, v in before.items()} }", flush=True)
+    act_power(rig_name, rig, p.get("off_value", 0), "关机[差分]")
+    time.sleep(6)
+    dark = _rk_usb_by_chain()
+    gone = [c for c in before if c not in dark]
+    act_power(rig_name, rig, p.get("on_value", 1), "开机[差分]")
+    back, waited = {}, 0
+    while waited < 40:                        # 等它重新枚举(0006 要等系统起来)
+        time.sleep(4); waited += 4
+        back = _rk_usb_by_chain()
+        if set(gone) & set(back):
+            break
+    dl = [c for c in gone if c in back]
+    if not dl:
+        tip = "、".join(gone) or "无设备消失"
+        raise RigError(4, f"差分未命中: 断电后消失的口={tip} 且 40s 内未回来。"
+                          "若 gone 为空: 下载线未插/USB口通道不对; 若没回来: 板子没起")
+    chain = dl[0]
+    dev = back[chain]
+    tgt = rig["target"]
+    tgt["download_chain"] = chain
+    tgt["download_pid_now"] = dev["pid"]
+    if dev["serial"]:
+        tgt["adb_serial"] = dev["serial"]
+    tgt["download_bound_at"] = time.strftime("%Y-%m-%d %H:%M")
+    tgt["download_bound_by"] = "bind-dl 断电差分"
+    save_rigs(rigs_path, all_rigs)
+    try:
+        bp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boards.json")
+        b = json.load(open(bp, encoding="utf-8"))
+        ck = tgt.get("console")
+        for k, v in b.items():
+            if not k.startswith("_") and hub_chain(k) == ck:
+                v["download_chain"] = chain
+                if dev["serial"]:
+                    v["adb_serial"] = dev["serial"]
+        json.dump(b, open(bp, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        open(bp, "a", encoding="utf-8").write("\n")
+    except Exception as e:
+        print(f"[warn] boards.json 同步失败: {e}", flush=True)
+    mode = USB_PID_MODE.get(dev["pid"], dev["pid"])
+    print(f"{rig_name}: ✔ 下载口绑定 → 物理口 {chain} "
+          f"(当前 {mode}, serial={dev['serial'][:16] or '无'})，已写入 rigs/boards",
+          flush=True)
 
 
 def act_verify(rig_name, rig, rigs_path, all_rigs, only=None, recover=False):
@@ -934,6 +1045,8 @@ def main():
         act_enter_loader(name, rig)
     elif action == "catch-uboot":
         act_catch_uboot(name, rig, select_usb="--menu" not in args)
+    elif action == "bind-dl":
+        act_bind_download(name, rig, rigs_path, rigs)
     elif action == "verify":
         only = None
         if "--only" in args:

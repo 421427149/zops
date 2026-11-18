@@ -78,7 +78,7 @@
     "controller": {
       "name": "H503开关机控制板",
       "cmd_port": "/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_005F003B3032510235343637-if00",
-      "usb_port_channel": null,
+      "usb_port_channel": "USB0",
       "power": {
         "method": "h503",
         "channel": "12V5",
