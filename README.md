@@ -7,6 +7,7 @@
 | **看** | 抗洪水串口终端；经网关聚合多块板 → 浏览器真终端 + AI 共用同一份流 | `serial_debug.py`、`agent_hub.py` |
 | **控** | 治具控电（继电器 GPIO / H503 电源板）、冷启动、进 Loader、内核已死时抓 U-Boot 救砖 | `rigctl.py` |
 | **认** | 物理插口/板名登记 + 账本签名自动取证 + 按板名操作 adb——杜绝"认错板子" | `boards.json`、`rigs.json`、`adbq.py` |
+| **烧** | 每块板的 **USB 下载口绑定**（断电差分+二次复核实证）：状态精确到口（0006 运行/350b Loader/320b MaskROM），`adbq`/烧录按名寻址 | `rigctl.py bind-dl` |
 | **自动** | 串口实例守护：插上即有、拔掉即收；网关自动发现实例并给 AI 一个入口（MCP `zops_*`） | `serial_keeper.py` |
 
 平台：Windows / Linux。终端本体专为**高波特率 + 大数据量刷屏**设计（1500000 波特率下不卡顿、
@@ -76,7 +77,8 @@ python serial_debug.py -p /dev/ttyUSB0 -b 1500000 --agent-http 8321
 | `mcp_bridge.py` | MCP stdio 桥（工具 `zops_*`，旧名 `qserial_*` 作别名） | AI 接串口 |
 | `hub_audit_view.py` | AI 读写活动的实时镜像（人围观 AI） | 想盯着 AI 在干什么 |
 | `agent_http.py` | 给 serial_debug 挂 HTTP 通道（由 `--agent-http` 加载） | 内部模块 |
-| `boards.json` / `rigs.json` | 板名映射 / 控电组合登记（改文件即生效） | 认板、换板 |
+| `boards.json` / `rigs.json` | 板名映射 / 控电组合登记（含 download_chain；改文件即生效） | 认板、换板、换线 |
+| `check_code.py` | 提交前自检：语法/重复定义/拼接事故/内嵌 JS | 改任何 py 后 |
 
 ---
 
@@ -196,7 +198,12 @@ ssh -N -L 8300:127.0.0.1:8300 <user>@<主机IP>
 - AI 经网关的发送以橙色 `⟦AI➤⟧` 行注入同一画面，长组合命令按 `;` 折行，并附一行灰色
   **人话翻译**（危险动作标红 ⚠）——本地规则库，零延迟；
 - 拉流走绝对 offset 增量读，**不消费 AI 的读游标**：人看和 AI 读互不干扰；
-- 实例重启导致账本清零时自动重新同步（画面上提示「串口通道已重连」）。
+- 实例重启导致账本清零时自动重新同步（画面上提示「串口通道已重连」）；
+- **复制粘贴四件套**：选中即复制（Ctrl+C 有选区=复制/无选区=中断板子）；选择时画面
+  自动**暂停跟随**（洪水冲不走选区，积压进缓冲、Esc 恢复）；右键=有选区复制/无选区
+  重发上次粘贴；**安全粘贴**——单行不自动执行、板端 bash 支持 bracketed-paste 时整块
+  包裹、否则逐行 70ms 限速 + 超量确认（防误执行/灌爆 UART）。局域网 http 读不了
+  剪贴板（浏览器安全策略），右键粘贴只能重发上次 Ctrl+V 过的内容。
 
 **rig 状态条**（终端区上方一行，5s 自刷）：每套组合的控制器/受控串口/USB 模式三盏灯 +
 **电源一键按钮**（开机 / 关机 / 冷启动 / 进Loader / 救砖进Loader，危险动作带确认框）。
@@ -238,7 +245,11 @@ python3 serial_keeper.py --once       # 单轮检查(调试)
   实例（`serial-auto-*` 会话，内含 while 自愈循环，agent 口在 8321..8400 里挑空闲）；
 - 适配器消失 → **宽限 120s** 后自动清理（给断电放电/重启留时间），回来自动重起；
 - 已被任何实例占用的口不碰（`pgrep` 按参数 + `fuser` 查真实 fd 占用，防"易失名实例"抢同一口）；
-- CH344Q 四合一 / H503 命令口不带 `-port0` 后缀，天然排除，不会误起空实例；
+- 单口 CH340（`-port0` 结尾）默认自动接管；**多口适配器**（CH344Q 四合一扩展坞等，
+  不带该后缀）须在 `keeper.json` 的 `"manage"` 白名单里显式列出键（如 `"1.3.3:1.2"`）
+  才接管——避免误把 H503 命令口当控制台打开；
+- 会话名用**可逆编码**（`.`↔`-`，`:`↔`~`，如 `serial-auto-1-3-3~1-2`）：历史版本
+  不可逆编码导致"每个实例 120s 后被误杀"的严重 bug，改码时务必保持可逆；
 - 波特率默认 1500000，特例写 `keeper.json`：
 
 ```json
@@ -259,6 +270,11 @@ python3 rigctl.py rig-A coldboot          # 关机 → 放电(discharge_s) → �
 python3 rigctl.py rig-A enter-loader      # 系统活着: 板型核对 → loader 命令 → 轮询 USB 判模式
 python3 rigctl.py rig-A catch-uboot       # 内核已死: 冷启动抢 U-Boot 菜单 → 选[3]进 Loader
 python3 rigctl.py rig-A bind              # 受控槽位重探测(关电盯谁灭→开电盯谁醒), 写回 rigs.json
+python3 rigctl.py rig-A bind-dl           # 绑定USB下载口(断电差分+二次复核), 会重启板子
+python3 rigctl.py rig-A verify            # 逐动作真跑+硬证据判定(off/on回读通道, coldboot看串口
+                                          #   新增字节, loader类看lsusb 350b), 结果写 rigs.json
+                                          #   的 verified, 网页按钮据此显示 ✓/✗/⚠
+                                          #   --only on,off 只验部分; --recover 验完冷启动回系统
 python3 rigctl.py --selftest
 ```
 
@@ -268,6 +284,21 @@ python3 rigctl.py --selftest
 |---|---|---|
 | **治具 GPIO**（如 T536） | 治具调试串口 shell → 写 `/sys/class/gpio` | 必须用 **sysfs**（`gpioset` exit 模式设完即复位）；4 路同值；GPIO 释放态（治具重启）= 断电 |
 | **H503 电源板** | USB CDC 命令口 | **双协议自适应**：现固件 A5 二进制 4 字节帧（回帧校验）、新固件 JSON 行协议（`{"ch":"5V2","st":1}`、`{"qr":...}` 查询）；通道名 `USB`/`5V2`/`5V3`/`12V4`/`12V5`；**裸 ON 无边沿不生效**（必须 OFF → 放电 ≥25s → ON）；板载 USB 口供电要先开 |
+
+### USB 下载口绑定（bind-dl，2026-11-18）
+
+每块板的 USB 下载/adb 线是一个独立的物理口，与串口控制台**不是同一个口**（实测：
+3588 A 控制台 1.4.3 / 下载口 1.4.4；3588 B 控制台 1.2 / 下载口 1.3）。`bind-dl`
+用断电差分自动找到本板下载口并**二次复核**（再断一次电、同一个口必须再消失，否则
+回滚），结论写进 `rigs.json` 的 `target.download_chain` 和 `boards.json`。
+
+绑定后的收益：
+
+* `rigctl status` 的 USB 灯**精确到口**（`2207:0006 运行态 @下载口1.3`），不再被
+  总线上其他 RK 板（SSI_17 之类）冒充；
+* `adbq` 按名寻址走 `download_chain`（旧逻辑拿控制台口对 adb 口，只在两口同位时
+  碰巧成立，已实测破产）；
+* 换线/挪线后拓扑会变，绑定是**快照不是永久事实**——挪过线重跑一次 `bind-dl` 即可。
 
 ### 进 Loader 与救砖（重要区别）
 
@@ -363,7 +394,8 @@ create_tab`；**旧名 `qserial_*` 仍作别名照收**（在线会话不必重�
 ### AI 活动审计与围观
 
 网关对每个 AI 读写落一行审计（`logs/hub_audit.jsonl`：时间/板名/动作/字节数/发送内容/接收尾部
-预览，带 `src` 区分网页与 AI）——这是**强制卡口**：AI 只要走网关，读到的内容必然先经过这里。
+预览，带 `src` 区分网页与 AI）；**电源按钮动作同样入账**（`tag: accepted/done`，含结果详情）——
+「按了没反应」从此有据可查。这是**强制卡口**：AI 只要走网关，读到的内容必然先经过这里。
 
 ```bash
 tmux new-session -d -s serial-audit "python3 hub_audit_view.py -n 20"
@@ -394,6 +426,8 @@ AI 直连实例端口（832x）可绕开审计——`AGENTS.md` 已将其列为�
 ## 测试
 
 ```bash
+python3 check_code.py           # 改任何 py 后必跑: 语法/顶层重复定义/拼接事故/内嵌JS
+                               # (pre-commit 钩子已强制; 拼接事故史: 同行双def x7)
 python flood_test.py            # 洪水压测：无损、账目守恒、日志完整、省略路径生效
 python smoke_test.py            # 命令与输入编辑冒烟测试
 python test_agent_http.py       # Agent 通道 20 项：对账/复读/双观察来源/AI 独立闭环/令牌/桥接

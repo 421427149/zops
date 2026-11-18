@@ -15,6 +15,7 @@
 | adb 操作板子 | `python3 adbq.py <板名> <adb子命令>`；**禁 adb 广播** |
 | 查谁是谁 | `curl http://127.0.0.1:8300/api/tabs`，看 title/board/hint 字段 |
 | 受控板电源/冷启动/进Loader | **一键接口** `POST /api/rigs/<组合名>/<on\|off\|coldboot\|enter-loader>`（人网页按钮走的就是它；动作异步执行，结果落在 `GET /api/rigs` 的 `last` 字段）；或命令行 `python3 rigctl.py <组合名> <同款动作>` |
+| 绑定 USB 下载口 / 逐动作验证 | `python3 rigctl.py <组合名> bind-dl`（断电差分+二次复核，写 `download_chain`）；`python3 rigctl.py <组合名> verify`（按钮交付前必跑，硬证据写 `verified`） |
 | **内核已 panic / 卡死要救砖** | `python3 rigctl.py <组合名> catch-uboot`（冷启动+连发 Ctrl+C 抢 U-Boot 3 秒倒计时+菜单选 `[3] USB update images` 进 Loader）。**内核死了 in-system 的 `enter-loader` 必然无效**，只有 U-Boot 这条路；`--menu` 只停在菜单不选 |
 | 看组合(控制台/受控/USB)状态 | `GET /api/rigs`（控制器✔/受控✔/USB 模式一屏全览，AI 先看这个再动手）|
 
@@ -37,13 +38,18 @@
 8. **电源类操作必须以"回读"为准，不信命令返回值**：GPIO 写完要回读
    `/sys/class/gpio/gpioN/value`，H503 要回读通道 `st`。只检查命令 rc=0 会把板子
    留在断电态（实测踩过）。任何流程中途失败，必须 `_ensure_power_on` 兜底。
-9. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
+9. **USB 拓扑易变**：动线/开关 H503 USB 口通道都可能让整棵子树重排（实测 1.3.x→1.1.x）。
+   症状是「板子不见了/Tab 变未识别」→ 先看 by-path 现状，串口身份 keeper 会自动重建，
+   下载口绑定重跑一次 `bind-dl`。绑定是快照，不是永久事实。
+10. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
    （`logs/hub_audit.jsonl`，主人用 `hub_audit_view.py` 实时围观）；直连 832x =
    绕开审计，等同私读。
 
 ## 登记表（事实源；改文件即生效，hub/实例不用重启）
 
-- `boards.json`：物理插口 → 板名映射。认出新板改一行 `name`；`note` 写证据。
+- `boards.json`：物理插口 → 板名映射。认出新板改一行 `name`；`note` 写证据；
+  条目里的 `download_chain` 是该板 USB 下载/adb 线的物理口（bind-dl 差分实证），
+  `adbq` 按名寻址靠它——控制台口和下载口**不是同一个口**，别混。
 - `rigs.json`：控电组合。**controller = 治具常量，不要动**；target = 受控槽位，
   换板/挪线后跑 `rigctl <组合名> bind`（会真实断电再上电一次）自动重探测回填，
   旧绑定进 `_history`。
