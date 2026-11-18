@@ -744,6 +744,11 @@ def act_bind_download(rig_name, rig, rigs_path, all_rigs):
         if set(gone) & set(back):
             break
     dl = [c for c in gone if c in back]
+    if len(dl) > 1:
+        # 多个口同时消失又回来 = 差分不干净(比如同通道上还挂着别的设备/集线器),
+        # 瞎选第一个会绑错板 —— 必须人工分辨后手动填 download_chain
+        raise RigError(4, f"差分命中 {len(dl)} 个口 {dl} 不唯一, 拒绝绑定; "
+                          "请人工确认后直接在 rigs.json 填 target.download_chain")
     if not dl:
         tip = "、".join(gone) or "无设备消失"
         raise RigError(4, f"差分未命中: 断电后消失的口={tip} 且 40s 内未回来。"
@@ -771,8 +776,19 @@ def act_bind_download(rig_name, rig, rigs_path, all_rigs):
         open(bp, "a", encoding="utf-8").write("\n")
     except Exception as e:
         print(f"[warn] boards.json 同步失败: {e}", flush=True)
+    # 二次复核: 再断电一次, 登记的口必须再次消失——否则说明差分是巧合, 回滚
+    print(f"{rig_name}: 二次复核(再断电一次验证同一个口)…", flush=True)
+    act_power(rig_name, rig, p.get("off_value", 0), "关机[复核]")
+    time.sleep(6)
+    check = _rk_usb_by_chain()
+    act_power(rig_name, rig, p.get("on_value", 1), "开机[复核]")
+    if chain in check:
+        tgt.pop("download_chain", None); tgt.pop("download_pid_now", None)
+        save_rigs(rigs_path, all_rigs)
+        raise RigError(4, f"复核失败: 断电后口 {chain} 仍在(第一次差分是巧合), "
+                          "已回滚绑定; 请检查是否有其他设备同电")
     mode = USB_PID_MODE.get(dev["pid"], dev["pid"])
-    print(f"{rig_name}: ✔ 下载口绑定 → 物理口 {chain} "
+    print(f"{rig_name}: ✔ 下载口绑定并复核通过 → 物理口 {chain} "
           f"(当前 {mode}, serial={dev['serial'][:16] or '无'})，已写入 rigs/boards",
           flush=True)
 
