@@ -24,7 +24,7 @@
       "name": "3588 A",
       "console": "1.4.3",
       "baud": 1500000,
-      "adb_serial": "7a0aab8c51b5474a",
+      "adb_serial": "ba27980e967d3a93",
       "alive_check": {
         "usb_vid_pid": "2207:0006",
         "note": "350b=Loader/MaskROM(两态同PID), 需 upgrade_tool ld 判 Mode; 系统活=0006"
@@ -32,7 +32,11 @@
       "bound_at": "2026-11-09 14:57",
       "bound_by": "串口静默排查: 1.4.4 适配器消失, 现场探测 1.4.3 出 TQ3588 提示符",
       "enter_loader_cmd": "reboot loader",
-      "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot"
+      "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot",
+      "download_chain": "1.4.4",
+      "download_pid_now": "0006",
+      "download_bound_at": "2026-11-18 16:55",
+      "download_bound_by": "bind-dl 断电差分"
     },
     "_history": [
       {
@@ -101,7 +105,12 @@
       },
       "bound_at": "2026-11-13",
       "bound_by": "逐路通电差分: 12V5 单独上电 → 1.2 口起量 + USB 2207:0006",
-      "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot"
+      "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot",
+      "download_chain": "1.3",
+      "download_pid_now": "0006",
+      "adb_serial": "45ef5567472a8f0c",
+      "download_bound_at": "2026-11-18 16:54",
+      "download_bound_by": "bind-dl 断电差分"
     },
     "verified": {
       "off": {

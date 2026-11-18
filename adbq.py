@@ -65,10 +65,20 @@ def load_chain_names(boards_path):
         return {}
     chain_names = {}
     for key, entry in mapping.items():
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not name:
+            continue
+        # 优先用 download_chain(板子 USB 下载/adb 设备真正所在的口, 由 bind-dl 差分
+        # 实证); 控制台口与下载口通常不是同一个口, 旧逻辑拿键(控制台口)去对 adb
+        # 设备的 usb 链路只在两口同位时碰巧成立(2026-11-18 实测破产)
+        dl = entry.get("download_chain")
+        if dl:
+            chain_names[dl] = name
         chain = hub_chain_of_key(key)
-        name = entry.get("name") if isinstance(entry, dict) else None
-        if chain and name:
-            chain_names[chain] = name
+        if chain and chain not in chain_names:
+            chain_names[chain] = name      # 兜底: adb 线恰好与控制台同口的旧布局
     return chain_names
 
 

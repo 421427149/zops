@@ -719,11 +719,9 @@ def act_bind_download(rig_name, rig, rigs_path, all_rigs):
     method = str(p.get("method", ""))
     usb_ch = ctrl.get("usb_port_channel")
     cmd_port = ctrl.get("cmd_port")
-    if not method.startswith("h503"):
-        raise RigError(3, "bind-dl 目前只支持 h503 电源板组合(GPIO 治具无 USB 口通道)")
-    if not p.get("channel"):
-        raise RigError(3, "电源通道未绑定, 先跑 bind")
-    if usb_ch:
+    if method.startswith("h503") and not p.get("channel"):
+        raise RigError(3, "电源通道未绑定, 先跑 bind")   # 通道校验仅 H503; GPIO 治具用 gpios
+    if method.startswith("h503") and usb_ch:      # USB 口供电仅 H503 有; GPIO 治具直接差分
         h503_power(cmd_port, usb_ch, 1, h503_detect(cmd_port)[0] or "json-v3.5")
         print(f"{rig_name}: 已开 USB 口通道 {usb_ch}(下载线供电)", flush=True)
         time.sleep(3)
