@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.5"
+HUB_VERSION = "3.6"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -563,6 +563,8 @@ class Hub:
                 rec["out"] = (req.get("text") or req.get("hex") or "")[:SEND_PREVIEW]
             elif action == "receive" and payload:
                 resp = (json.loads(payload) or {}).get("data") or {}
+                if not resp.get("bytes"):
+                    return               # 空读(长轮询无数据)不写审计, 免得每400ms刷一条
                 text = resp.get("text") or ""
                 rec["offset"] = resp.get("offset")
                 rec["bytes"] = resp.get("bytes")
@@ -801,7 +803,10 @@ function note(s){$('st').textContent=s}
 async function pollTabs(){try{const d=await jget('/api/tabs');tabs=d.tabs;renderTabs();
  if(active===null&&tabs.length)sel(tabs[0].index);
  note(tabs.length?('在线 '+tabs.length+' 板'):'无实例在线')}catch(e){note('hub 不可达: '+e.message)}}
-function renderTabs(){const bar=$('tabs');bar.textContent='';
+let _tabsSig='';
+function renderTabs(){const sig=JSON.stringify(tabs.map(t=>[t.index,t.title,t.open]));
+ if(sig===_tabsSig)return;_tabsSig=sig;
+ const bar=$('tabs');bar.textContent='';
  for(const t of tabs){const b=document.createElement('button');
   b.className='tab'+(t.index===active?' on':'');
   b.textContent=(t.open?'● ':'○ ')+t.title;b.onclick=()=>sel(t.index);bar.appendChild(b)}}
@@ -832,9 +837,13 @@ function resumeFollow(){ if(follow)return; follow=true;
    if(t.length>250000){term.write('\x1b[90m⟦…冻结期积压已截断, 完整内容在磁盘账本⟧\x1b[0m\r\n');t=t.slice(-250000)}
    if(k==active)term.write(t)}}
  term.scrollToBottom();setFollowChip();term.focus()}
-function setFollowChip(){ $('lock').style.display=follow?'none':'block';
- if(!follow){const s=state[active];const n=(s&&s.pending)?s.pending.length:0;
-  $('lock').textContent='⏸ 已暂停跟随(选择中'+(n?',积压'+n+'B':'')+') — Esc/点此恢复'} }
+let _chipSig='';
+function setFollowChip(){               // 每串数据都会调——签名不变时零 DOM 操作(防渲染抖动)
+ const n=(state[active]&&state[active].pending)?state[active].pending.length:0;
+ const sig=follow+'|'+(follow?0:n);
+ if(sig===_chipSig)return;_chipSig=sig;
+ $('lock').style.display=follow?'none':'block';
+ if(!follow)$('lock').textContent='⏸ 已暂停跟随(选择中'+(n?',积压'+n+'B':'')+') — Esc/点此恢复'}
 async function streamLoop(){while(true){
  if(active===null||document.hidden){await sleep(300);continue}
  const tab=active,s=state[tab];          // 固定本轮所属 tab, 防切页后写错画面
@@ -1014,7 +1023,9 @@ function tl(cmd){cmd=cmd||"";
  if(all.length>4)res+=" → …(共"+all.length+"段)";
  return res}
 
+let _rigsSig='';
 async function pollRigs(){try{const d=await jget('/api/rigs');
+ const sig=JSON.stringify(d.rigs);if(sig===_rigsSig)return;_rigsSig=sig;
  const box=$('rigs');box.textContent='';
  for(const r of d.rigs){
   const row=document.createElement('div');row.className='rig';
@@ -1069,7 +1080,10 @@ async function sendPasteBox(){
 function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
  if(m){const g=m[1].split(':');return g.length>1?g[1]:g[0]}
  const b=(t||'').split('/').pop();return /^tty/.test(b)?b:null}
+let _aiSig='';
 async function pollAI(){try{const d=await jget('/api/audit?n=30');
+ const sig=JSON.stringify((d.records||[]).map(r=>[r.t,r.board,r.action,r.src]));
+ if(sig===_aiSig)return;_aiSig=sig;
  for(const r of (d.records||[])){
   if(r.action!=='send'||r.src==='web')continue;      // 网页自己的不标, 只标 AI
   if(pollAI.seen===undefined)pollAI.seen=[];
@@ -1091,8 +1105,12 @@ async function pollAI(){try{const d=await jget('/api/audit?n=30');
 $('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
 $('rigs').ondblclick=()=>$('rigs').classList.toggle('folded');
 $('lock').onclick=()=>{term.clearSelection();resumeFollow()};
-new ResizeObserver(()=>{try{fit.fit()}catch(e){}}).observe($('rigs'));
-new ResizeObserver(()=>{try{fit.fit()}catch(e){}}).observe($('term'));
+let _fitT=null;
+function fitSoon(){if(_fitT)return;_fitT=setTimeout(()=>{_fitT=null;try{fit.fit()}catch(e){}},150)}
+// fit 直接挂 observer 会与终端 resize 互相触发形成振荡循环(每轮全量重排=持续卡顿),
+// 去抖合并到 150ms 一帧
+new ResizeObserver(fitSoon).observe($('rigs'));
+new ResizeObserver(fitSoon).observe($('term'));
 setInterval(pollTabs,3000);setInterval(pollAI,2500);setInterval(pollRigs,5000);
 streamLoop();pollTabs();pollAI();pollRigs();
 </script></body></html>"""
