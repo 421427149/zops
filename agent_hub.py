@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.4"
+HUB_VERSION = "3.5"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -939,11 +939,18 @@ term.element.addEventListener('mouseup',()=>{setTimeout(()=>{
  if(!term.getSelection()&&follow===false&&!selectHold)resumeFollow()},60)});
 let selectHold=false;
 term.onSelectionChange(()=>{selectHold=!!term.getSelection();setFollowChip()});
-term.element.addEventListener('contextmenu',ev=>{    // 右键: 有选区=复制, 无=弹粘贴框
+async function directPaste(){                     // 安全上下文(https/localhost)才能读剪贴板
+ if(navigator.clipboard&&window.isSecureContext){
+  try{const t=await navigator.clipboard.readText();
+   if(t){smartPaste(t);return}}catch(e){}}
+ openPasteBox()}                                 // http 环境读不了 → 弹框保底
+term.element.addEventListener('contextmenu',ev=>{    // 右键: 有选区=复制, 无=直接粘贴
  ev.preventDefault();
  const t=term.getSelection();
  if(t){copyText(t);term.clearSelection();return}
- openPasteBox()});
+ directPaste()});
+term.element.addEventListener('auxclick',ev=>{       // 中键: 直接粘贴(https 下生效)
+ if(ev.button===1){ev.preventDefault();directPaste()}});
 // 粘贴拦截必须在 document 捕获阶段: xterm 的 handlePasteEvent 会对 paste 事件
 // stopPropagation(), 挂在 window/bubble 层的监听永远收不到(v3.3 因此整体失效,
 // 2026-11-19 实测教训)。捕获先到 → preventDefault+stopPropagation 后 xterm 的
@@ -1117,6 +1124,11 @@ def main():
                         help=f"板名映射 JSON, 默认 {BOARDS_DEFAULT}")
     parser.add_argument("--audit", default=AUDIT_DEFAULT, metavar="FILE",
                         help=f"AI 活动审计 JSONL(空串关闭), 默认 {AUDIT_DEFAULT}")
+    parser.add_argument("--tls-port", type=int, default=8443, metavar="PORT",
+                        help="浏览器 HTTPS 入口端口(配合 --tls-cert), 默认 8443")
+    parser.add_argument("--tls-cert", default="", metavar="FILE",
+                        help="TLS 证书 PEM; 给出后启用 HTTPS 入口(HTTP API 口不变)")
+    parser.add_argument("--tls-key", default="", metavar="FILE", help="TLS 私钥 PEM")
     parser.add_argument("--ignore-ports", default="8321", metavar="PORTS",
                         help="扫描时忽略的端口(逗号分隔; 兼容门/转发器收编会造重复Tab), 默认 8321")
     args = parser.parse_args()
@@ -1128,6 +1140,19 @@ def main():
     server = ThreadingHTTPServer((args.host, args.listen), _Handler)
     server.hub = hub
     server.daemon_threads = True
+    if args.tls_cert:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
+        tls_srv = ThreadingHTTPServer((args.host, args.tls_port), _Handler)
+        tls_srv.hub = hub
+        tls_srv.daemon_threads = True
+        tls_srv.socket = ctx.wrap_socket(tls_srv.socket, server_side=True)
+        threading.Thread(target=tls_srv.serve_forever,
+                         kwargs={"poll_interval": 0.5}, daemon=True).start()
+        print(f"[hub] HTTPS 入口 https://{args.host}:{args.tls_port}/ "
+              f"(自签证书——浏览器首次访问点'继续前往', 之后右键/中键可直接读剪贴板粘贴)",
+              flush=True)
     print(f"[hub] ZOps 网关 v{HUB_VERSION} (聚合 serial_debug 实例) 监听 "
           f"http://{args.host}:{args.listen} (扫描 {args.scan_min}..{args.scan_max})", flush=True)
     try:
