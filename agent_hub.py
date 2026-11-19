@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.3"
+HUB_VERSION = "3.4"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -760,9 +760,20 @@ UI_HTML = r"""<!DOCTYPE html>
 </style></head><body>
 <div id="bar"><span style="color:#7f8c9b;font-size:12px">板子:</span>
  <span id="tabs" style="display:contents"></span><span id="st"></span>
- <span style="color:#4a5568;font-size:11px;margin-left:8px">hub v2.3</span></div>
+ <button class="rbtn" onclick="openPasteBox()" title="打开粘贴框(保底入口)">📋粘贴</button>
+ <span style="color:#4a5568;font-size:11px;margin-left:8px">hub v3.4</span></div>
 <div id="rigs">rig 状态条加载中…</div>
 <div id="term"></div>
+<textarea id="pbox" placeholder="在这里按 Ctrl+V 粘贴, 然后点下方发送(多行按安全粘贴规则发给当前板)"
+ style="display:none;position:fixed;z-index:10;left:50%;top:30%;transform:translate(-50%,-50%);
+ width:min(560px,80vw);height:200px;background:#151a20;color:#e6edf3;border:1px solid #2f6fed;
+ border-radius:8px;padding:12px;font:13px Consolas,monospace"></textarea>
+<div id="pbtns" style="display:none;position:fixed;z-index:10;left:50%;top:calc(30% + 120px);
+ transform:translateX(-50%)">
+ <button class="rbtn" style="background:#2f6fed;color:#fff;border:0;padding:8px 22px"
+  onclick="sendPasteBox()">发送到板子</button>
+ <button class="rbtn" style="margin-left:10px;padding:8px 16px" onclick="closePasteBox()">取消</button>
+</div>
 <div id="lock" style="display:none;position:fixed;left:50%;transform:translateX(-50%);
  bottom:14px;background:#2d2a1e;border:1px solid #d29922;color:#d8b466;border-radius:7px;
  padding:5px 14px;font:12px Consolas,monospace;cursor:pointer;z-index:9"></div>
@@ -928,16 +939,21 @@ term.element.addEventListener('mouseup',()=>{setTimeout(()=>{
  if(!term.getSelection()&&follow===false&&!selectHold)resumeFollow()},60)});
 let selectHold=false;
 term.onSelectionChange(()=>{selectHold=!!term.getSelection();setFollowChip()});
-term.element.addEventListener('contextmenu',ev=>{    // 右键: 有选区=复制, 无=粘贴上一次
+term.element.addEventListener('contextmenu',ev=>{    // 右键: 有选区=复制, 无=弹粘贴框
  ev.preventDefault();
  const t=term.getSelection();
  if(t){copyText(t);term.clearSelection();return}
- if(lastPaste){smartPaste(lastPaste)}
- else note('右键粘贴需先 Ctrl+V 过一次(局域网 http 读不了剪贴板)')});
-window.addEventListener('paste',ev=>{                 // Ctrl+V 统一走安全粘贴
- if(active===null)return;
- const t=(ev.clipboardData||window.clipboardData).getData('text/plain');
- if(!t)return;ev.preventDefault();smartPaste(t)});
+ openPasteBox()});
+// 粘贴拦截必须在 document 捕获阶段: xterm 的 handlePasteEvent 会对 paste 事件
+// stopPropagation(), 挂在 window/bubble 层的监听永远收不到(v3.3 因此整体失效,
+// 2026-11-19 实测教训)。捕获先到 → preventDefault+stopPropagation 后 xterm 的
+// 原始直通路径不再执行, smartPaste 全权处理。
+document.addEventListener('paste',ev=>{
+ if(ev.target!==term.textarea)return;   // 粘贴框等原生粘贴放行
+ const t=ev.clipboardData&&ev.clipboardData.getData('text/plain');
+ if(!t)return;
+ ev.preventDefault();ev.stopPropagation();
+ smartPaste(t)},true);
 term.onData(d=>{if(active===null)return;
  if(raw){rawSend(d)}else{lineKey(d)}});
 const TL=[   // AI 命令人话翻译规则(首条命中即用, $1..$9=正则分组); 想加词在这补一行
@@ -1034,6 +1050,14 @@ async function pollRigs(){try{const d=await jget('/api/rigs');
   if(r.last){const l=document.createElement('span');l.className='last';l.textContent='↳ '+r.last;
    row.appendChild(l)}
   box.appendChild(row)}}catch(e){$('rigs').textContent='rig 状态获取失败: '+e.message}}
+
+function openPasteBox(){                        // 保底粘贴入口: 真 textarea, 任何浏览器都能 Ctrl+V 进去
+ const b=$('pbox');b.style.display='block';b.value='';b.focus();
+ $('pbtns').style.display='block'}
+function closePasteBox(){$('pbox').style.display='none';$('pbtns').style.display='none';term.focus()}
+async function sendPasteBox(){
+ const v=$('pbox').value;if(!v)return;
+ closePasteBox();await smartPaste(v)}
 
 function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
  if(m){const g=m[1].split(':');return g.length>1?g[1]:g[0]}
