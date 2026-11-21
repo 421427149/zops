@@ -22,9 +22,12 @@
 ## 铁律
 
 1. **动手前先 list_tabs**：Tab 序号随实例上下线而变，上次会话记的 index 作废。
-2. **title 是板名，hint 是证据**：title 来自 boards.json 或账本签名自动派生
-   （`name_source` 区分人工/推断）；hint 是账本尾部 `root@主机名`/SoC 签名。
-   两者矛盾 = 接线变过，先核对再操作。
+2. **title 是板名，hint 是证据**：title 三级取用——`boards.json` 人工名 >
+   `rigs.json` 里 `rigctl bind` 回填的槽位名（rig-A/rig-B 的 `target.name`，如「3588 A」）>
+   账本签名自动派生；`name_source` 标明来源（boards.json / rig绑定 / hint自动）。
+   hint 是账本尾部 `root@主机名`/SoC 签名。两者矛盾 = 接线变过，先核对再操作。
+   绑定过的板子即使 boards.json 没登记/没重登记，也能按 rig 槽位显示成 A/B——
+   这正是「挪线后 Tab 该叫什么」的事实源。
 3. **禁止背 ttyUSBx 编号**：重插即重编号（实测一天变两次）。寻址只用板名或
    by-path 链路段（如 `1.4.2`）。
 4. **`send`/`open`/`close`/`rigctl off|coldboot|bind` 都是真实设备操作**。off/coldboot/bind
@@ -50,9 +53,10 @@
 - `boards.json`：物理插口 → 板名映射。认出新板改一行 `name`；`note` 写证据；
   条目里的 `download_chain` 是该板 USB 下载/adb 线的物理口（bind-dl 差分实证），
   `adbq` 按名寻址靠它——控制台口和下载口**不是同一个口**，别混。
+  键是**控制台适配器**所在插口；线挪了口没跟着改，网页会按 rig 绑定名兜底显示。
 - `rigs.json`：控电组合。**controller = 治具常量，不要动**；target = 受控槽位，
   换板/挪线后跑 `rigctl <组合名> bind`（会真实断电再上电一次）自动重探测回填，
-  旧绑定进 `_history`。
+  旧绑定进 `_history`。target.console 同时是网页 Tab 的「A/B 槽位名」来源。
 
 ## 新板子上线 = 插线即可（serial_keeper 守护全自动）
 
@@ -71,14 +75,19 @@ serial-audit(审计镜像)。hub 常驻检查: `curl -s http://127.0.0.1:8300/ap
 
 ```bash
 python3 check_code.py             # 语法 + 重复定义 + 拼接事故 + 内嵌JS  (改任何 py 后必跑)
-python3 test_agent_http.py        # 20 项, 自包含不碰真设备
+python3 test_agent_http.py        # 20 项, 自包含不碰真设备(只删自己造的临时 logs 文件)
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
-python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为
+python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为/选中标签高亮回归
 python3 serial_keeper.py --status # keeper 管理视图(实例缺失会自动补, 无需手动起)
 ```
 
 提交信息按天嵌规范：`(等级)[type][uart] 描述`，描述含原因+解决方式。
+
+**自检脚本不许删 `logs/`**：`logs/hub.log`（systemd `StandardOutput=append:` 指向它）和
+`logs/hub_audit.jsonl`（AI 读写审计账）是运行产物与审计证据，删了 hub 会起不来
+（`status=209/STDOUT`）、审计历史不可恢复。测试若需要临时日志，只删自己新建的文件
+（`test_agent_http.py` 已按「运行前快照、只删新增」实现）。
 
 ## 许可（别搞错）
 

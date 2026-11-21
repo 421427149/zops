@@ -33,6 +33,14 @@ class NullIO:  # 静音屏显输出
 real = sys.stdout
 fails = []
 
+# 自检期间 agent_http 会往 logs/ 写抓包; 先记下已有文件名, 收尾只删本次新增的。
+# 血训(2026-11-21): 收尾原为 shutil.rmtree("logs"), 把项目真实 logs/ 连 hub.log
+# 与审计账 hub_audit.jsonl 一起删了——systemd 的 StandardOutput 指向 logs/hub.log,
+# 网关当场起不来, 审计证据也一并丢失。
+import os
+os.makedirs("logs", exist_ok=True)
+_logs_before = set(os.listdir("logs"))
+
 
 def check(name, cond, detail=""):
     if cond:
@@ -252,8 +260,16 @@ time.sleep(0.1)
 sys.stdout = real
 t.close_all()
 t2.close_all()
-import shutil
-shutil.rmtree("logs", ignore_errors=True)
+# 只删本次自检新产生的抓包, 不碰 logs/ 里的 hub.log / hub_audit.jsonl 等运行产物
+for _name in os.listdir("logs"):
+    if _name in _logs_before:
+        continue
+    _path = os.path.join("logs", _name)
+    try:
+        if os.path.isfile(_path):
+            os.remove(_path)
+    except OSError:
+        pass
 
 print(f"\nAI AGENT TEST {'OK' if not fails else 'FAILED'}  ({len(fails)} 项失败)")
 sys.exit(0 if not fails else 1)

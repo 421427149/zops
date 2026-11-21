@@ -84,6 +84,61 @@ def check_key_functions(html):
     return False, f"tl() 行为异常: {vals}"
 
 
+def check_tab_highlight(js):
+    """选中标签必须高亮: renderTabs 的 DOM 缓存签名里必须含 active。
+
+    血训(2026-11-21): 卡顿优化给 renderTabs 加了签名缓存, 但签名只有
+    [index,title,open]; sel() 只改 active 后签名不变 → 直接 return,
+    className 永不更新, 高亮一直停在上一个 Tab(用户报"选中的板子标签不会高亮")。
+    本项用 node 桩跑真函数, 断言: 首屏高亮 0、切 Tab 后 on 跟着走、无变化不重建。
+    """
+    s = js.find("function renderTabs()")
+    e = js.find("async function sel(", s)
+    if s < 0 or e < 0:
+        return False, "找不到 renderTabs / sel 锚点"
+    fn = js[s:e].strip()
+    if "JSON.stringify" not in fn:
+        return True, "(renderTabs 无签名缓存, 必然重建——不会犯本 bug)"
+    probe = """
+let tabs=[{index:0,title:'3588 A',open:true,name_source:'rig绑定',rig:'rig-A',rig_name:'3588 A',port:'1.4.4',hint:'h'},
+          {index:1,title:'3588 B',open:false,name_source:'boards.json',port:'1.2',hint:''}];
+let active=0,_tabsSig='';
+const made=[];
+const bar={textContent:'',appendChild(b){made.push(b)}};
+const document={createElement:()=>({className:'',textContent:'',title:'',onclick:null})};
+const $=()=>bar;
+""" + fn + """
+const snap=()=>made.map(b=>b.className);
+made.length=0; renderTabs();
+const a=snap();
+made.length=0; active=1; renderTabs();
+const b=snap();
+made.length=0; renderTabs();
+const c=snap();
+console.log(JSON.stringify([a,b,c]));
+"""
+    open("/tmp/ui_tabs.js", "w", encoding="utf-8").write(probe)
+    try:
+        r = subprocess.run(["node", "/tmp/ui_tabs.js"], capture_output=True, text=True, timeout=20)
+    except FileNotFoundError:
+        return True, "(无 node, 跳过行为抽查)"
+    except subprocess.TimeoutExpired:
+        return False, "node 超时"
+    if r.returncode != 0:
+        return False, f"node 执行失败: {r.stderr.strip()[:200]}"
+    try:
+        a, b, c = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False, f"输出无法解析: {r.stdout[:200]!r}"
+    if a != ["tab on", "tab"]:
+        return False, f"首屏高亮位置错: {a}"
+    if b != ["tab", "tab on"]:
+        return False, f"切 Tab 后高亮没跟着走: {b}(renderTabs 缓存签名漏了 active?)"
+    if c != []:
+        return False, f"active/title 没变却重建了 DOM: {c}"
+    return True, "首屏+切 Tab 高亮正确, 无变化不重建"
+
+
 def main():
     base = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8300").rstrip("/")
     try:
@@ -100,6 +155,7 @@ def main():
     checks.append(("JS 语法", *check_syntax(js)))
     checks.append(("函数无重复定义", *check_no_duplicate_defs(js)))
     checks.append(("翻译器行为", *check_key_functions(html)))
+    checks.append(("选中标签高亮", *check_tab_highlight(js)))
     checks.append(("静态外链脚本", True,
                    ", ".join(re.findall(r'src="(/static/[^"]+)"', html)) or "无"))
 

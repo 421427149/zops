@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.6"
+HUB_VERSION = "3.7"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -139,6 +139,7 @@ class Hub:
         self._usb_cache = {}              # 组合名 -> (monotonic, usb模式) 10s 缓存
         self._h503_cache = {}             # 组合名 -> (monotonic, proto, msg) 30s 缓存
         self._boards_cache = (None, {})   # (mtime, 映射表), mtime 变了才重读(免重启)
+        self._rigs_cache = (None, {})     # (mtime, rigs.json), bind 回填后免重启即生效
         self._hint_cache = {}             # agent_port -> (capture_bytes, hint)
         self._pool = ThreadPoolExecutor(PROBE_WORKERS)
         self._log_lock = threading.Lock()
@@ -232,7 +233,14 @@ class Hub:
             entry["board"] = board.get("name") if board else None
             if board and board.get("note"):
                 entry["board_note"] = board["note"]
-            # ③ 被动取证: 只读账本尾部提取签名(零字节发送)
+            # ③ rig 槽位: rigctl bind 回填的 console 就是「这块板是 A 还是 B」的事实源
+            #    (boards.json 是物理口快照, 挪线没重登记时它认不出来; rig 绑定能)
+            rig = self._rig_of(entry.get("port"))
+            if rig:
+                entry["rig"] = rig["rig"]          # 如 rig-A
+                entry["rig_name"] = rig["name"]    # 如 3588 A
+                entry["rig_console"] = rig["console"]
+            # ④ 被动取证: 只读账本尾部提取签名(零字节发送)
             entry["hint"], parts = self._hint_of(inst)
             entry["board_auto"] = self._auto_name(parts)   # 未登记板自动派生板名
             entries.append(entry)
@@ -240,18 +248,28 @@ class Hub:
         return {"tabs": entries}
 
     def _finalize_titles(self, entries):
-        """定标题: 人工名 > 自动名 > 原串口名; 同名撞车一律加物理插口后缀。
+        """定标题: 人工名 > rig 绑定名 > 自动名; 同名撞车一律加物理插口后缀。
+
+        boards.json 是「物理插口→板名」的快照, 挪线后对不上; rigs.json 的
+        target.console 是 `rigctl bind` 实测回填的槽位身份, 所以它排第二位——
+        绑定过的板子即使没重登记 boards.json 也能显示成「3588 A/B」。
 
         两块同型号板(如两台 TQ3588)会派生出同名, 撞车时全部加 @插口 短后缀,
         保证 Tab 标题两两不同——AI 认板子的最后防线。
         """
-        names = [e.get("board") or e.get("board_auto") for e in entries]
+        names = [e.get("board") or e.get("rig_name") or e.get("board_auto")
+                 for e in entries]
         duplicate = {n for n in names if n and names.count(n) > 1}
         for entry, name in zip(entries, names):
             if not name:
                 continue
             entry["title"] = name if name not in duplicate else f"{name}@{self._jack_of(entry.get('port'))}"
-            entry["name_source"] = "boards.json" if entry.get("board") else "hint自动"
+            if entry.get("board"):
+                entry["name_source"] = "boards.json"
+            elif entry.get("rig_name"):
+                entry["name_source"] = "rig绑定"
+            else:
+                entry["name_source"] = "hint自动"
 
     @staticmethod
     def _jack_of(port):
@@ -286,6 +304,51 @@ class Hub:
         mapping = self._boards()
         entry = mapping.get(port) or mapping.get(os.path.basename(port))
         return entry if isinstance(entry, dict) else None
+
+    def _rigs(self):
+        """读 rigs.json; mtime 没变用缓存, rigctl bind 改完文件即生效不用重启。"""
+        path = self._rigs_path()
+        if not os.path.isfile(path):
+            return {}
+        mtime = os.stat(path).st_mtime
+        if self._rigs_cache[0] != mtime:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    rigs = json.load(f)
+            except (OSError, ValueError) as e:
+                print(f"[hub] rigs.json 读取失败(沿用旧表): {e}", flush=True)
+                rigs = self._rigs_cache[1]
+            self._rigs_cache = (mtime, rigs if isinstance(rigs, dict) else {})
+        return self._rigs_cache[1]
+
+    def _rig_of(self, port):
+        """串口路径 → 登记它的受控槽位 {"rig","name","console"}; 认不出返回 None。
+
+        只认 target.console(受控板控制台), 不认 controller(治具控制台不是板子)。
+        匹配复用 rigctl.port_matches: 链路段优先, by-path 键与 ttyUSBn 实例都认。
+        """
+        if not port:
+            return None
+        try:
+            R = self._rig_mod()          # 复用 rigctl 的归一化规则, 不另造一套
+            rigs = self._rigs()
+        except Exception:
+            return None
+        for rig_name, rig in rigs.items():
+            if not isinstance(rig, dict):
+                continue
+            target = rig.get("target") or {}
+            console = target.get("console")
+            if not console:
+                continue
+            try:
+                if R.port_matches(port, console):
+                    return {"rig": rig_name,
+                            "name": target.get("name") or rig_name,
+                            "console": console}
+            except Exception:
+                continue
+        return None
 
     def _hint_of(self, inst):
         """被动取证: 回看实例账本尾部提取 host/SoC/dtb/U-Boot 签名。
@@ -442,7 +505,10 @@ class Hub:
                     mode = None
                 self._usb_cache[name] = (tnow, mode)
             entry["target"] = {"name": tgt.get("name"), "ok": bool(thit),
-                               "detail": f"实例{thit['agent_port']}" if thit else "无实例",
+                               "detail": (f"实例{thit['agent_port']}" if thit else
+                                          f"无实例(登记 @{tgt.get('console')})" if tgt.get("console")
+                                          else "无实例(未登记控制台)"),
+                               "console": tgt.get("console"),
                                "tab": thit["agent_port"] if thit else None,
                                "usb": mode, "enter_loader_cmd": tgt.get("enter_loader_cmd")}
             entry["verified"] = rig.get("verified") or {}
@@ -804,12 +870,18 @@ async function pollTabs(){try{const d=await jget('/api/tabs');tabs=d.tabs;render
  if(active===null&&tabs.length)sel(tabs[0].index);
  note(tabs.length?('在线 '+tabs.length+' 板'):'无实例在线')}catch(e){note('hub 不可达: '+e.message)}}
 let _tabsSig='';
-function renderTabs(){const sig=JSON.stringify(tabs.map(t=>[t.index,t.title,t.open]));
+/* 签名必须含 active: 否则 sel() 只改 active 不重建 DOM, 选中标签永远不高亮
+   (2026-11-21 实测: 点 tab 后按 Enter 有反应, 但蓝色高亮停在上一个) */
+function renderTabs(){const sig=JSON.stringify([active,tabs.map(t=>[t.index,t.title,t.open])]);
  if(sig===_tabsSig)return;_tabsSig=sig;
  const bar=$('tabs');bar.textContent='';
  for(const t of tabs){const b=document.createElement('button');
   b.className='tab'+(t.index===active?' on':'');
-  b.textContent=(t.open?'● ':'○ ')+t.title;b.onclick=()=>sel(t.index);bar.appendChild(b)}}
+  b.textContent=(t.open?'● ':'○ ')+t.title;
+  b.title=[t.title,'来源: '+(t.name_source||'未知'),
+           t.rig?('槽位: '+t.rig_name+' ('+t.rig+')'):'',
+           t.port||'',(t.hint||'').slice(0,300)].filter(Boolean).join('\n');
+  b.onclick=()=>sel(t.index);bar.appendChild(b)}}
 async function sel(i){active=i;const s=state[i]||(state[i]={off:null,buf:'',raw:false,hist:[],hi:0});
  raw=s.raw;line='';renderTabs();
  term.reset();

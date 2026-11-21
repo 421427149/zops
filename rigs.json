@@ -22,21 +22,21 @@
     },
     "target": {
       "name": "3588 A",
-      "console": "1.4.3",
+      "console": "1.4.4",
       "baud": 1500000,
-      "adb_serial": "ba27980e967d3a93",
+      "adb_serial": "45ef5567472a8f0c",
       "alive_check": {
         "usb_vid_pid": "2207:0006",
         "note": "350b=Loader/MaskROM(两态同PID), 需 upgrade_tool ld 判 Mode; 系统活=0006"
       },
-      "bound_at": "2026-11-09 14:57",
-      "bound_by": "串口静默排查: 1.4.4 适配器消失, 现场探测 1.4.3 出 TQ3588 提示符",
+      "bound_at": "2026-11-21 14:02",
+      "bound_by": "线位互换实证(未再断电): 13:54:59 rig-A coldboot → 1.4.4 于 13:55:06 起收启动日志; adbq/lsusb 显示 1.4.3 的 2207:0006 iSerial=45ef5567472a8f0c",
       "enter_loader_cmd": "reboot loader",
       "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot",
-      "download_chain": "1.4.4",
+      "download_chain": "1.4.3",
       "download_pid_now": "0006",
-      "download_bound_at": "2026-11-18 16:55",
-      "download_bound_by": "bind-dl 断电差分"
+      "download_bound_at": "2026-11-21 14:02",
+      "download_bound_by": "同一轮线位互换实证: USB 与串口对调, 1.4.3 现为 A 板下载口"
     },
     "_history": [
       {
@@ -48,6 +48,11 @@
         "target": "TQ3588 console@1.4.4",
         "until": "2026-11-09 14:57",
         "note": "烧录会话期间线被挪回老位置"
+      },
+      {
+        "target": "TQ3588 console@1.4.3 / USB@1.4.4",
+        "until": "2026-11-21 13:55",
+        "note": "两根线对调: 冷启动后 1.4.4 出启动日志、1.4.3 的 USB iSerial=45ef…; 登记改为 console@1.4.4 / download@1.4.3"
       }
     ],
     "verified": {
@@ -108,9 +113,9 @@
       "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot",
       "download_chain": "1.3",
       "download_pid_now": "0006",
-      "adb_serial": "45ef5567472a8f0c",
+      "adb_serial": "ba6abb3faca76ab6",
       "download_bound_at": "2026-11-18 16:54",
-      "download_bound_by": "bind-dl 断电差分"
+      "download_bound_by": "bind-dl 断电差分; 2026-11-21 14:01 adbq/lsusb 复核 SN=ba6abb3faca76ab6(旧记 45ef… 实为 A 板)"
     },
     "verified": {
       "off": {

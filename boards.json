@@ -1,5 +1,6 @@
 {
   "_说明": "板名映射: 键=实例上报的串口路径或其 basename(by-path 稳定; ttyUSBx 会因重插变号, 不建议登记), 值={name,note}; 改完保存即生效(hub 按 mtime 重读), 无需重启。坐标系与 rigs.json/adbq 同源",
+  "_标题优先级": "tab 标题: boards.json.name > rigs.json 绑定的 target.name(rigctl bind 回填) > 账本 hint 自动名; 挪线后先改这里, 绑定过的板子即使这里没登记也会按 rig 名显示",
   "pci-0000:0c:00.3-usb-0:1.4.2:1.0-port0": {
     "name": "TQ536",
     "note": "rig-A 控制端控制台 @115200, root@TQ536 实证(2026-11-08)"
@@ -10,15 +11,15 @@
   },
   "pci-0000:0c:00.3-usb-0:1.2:1.0-port0": {
     "name": "3588 B",
-    "note": "rig-B 受控板(单片机 12V5 供电, 端口1.2); 带 WM8988/cjc8988 声卡; 旧名 TQ3588-8988",
+    "note": "rig-B 受控板(单片机 12V5 供电, 端口1.2); 带 WM8988/cjc8988 声卡; 旧名 TQ3588-8988; 2026-11-21 14:01 adbq/lsusb 实测 SN=ba6abb3faca76ab6",
     "download_chain": "1.3",
-    "adb_serial": "45ef5567472a8f0c"
+    "adb_serial": "ba6abb3faca76ab6"
   },
-  "pci-0000:0c:00.3-usb-0:1.4.3:1.0-port0": {
+  "pci-0000:0c:00.3-usb-0:1.4.4:1.0-port0": {
     "name": "3588 A",
-    "note": "rig-A 受控板(T536 治具 GPIO 供电, 端口1.4.3); FastBoot-MIPI 变体; 旧名 TQ3588",
-    "download_chain": "1.4.4",
-    "adb_serial": "ba27980e967d3a93"
+    "note": "rig-A 受控板(T536 治具 GPIO 供电, 控制台端口1.4.4); FastBoot-MIPI 变体; 旧名 TQ3588; 2026-11-21 13:55 控制台与USB线位互换后由1.4.3挪来, 冷启动即在本口出启动日志",
+    "download_chain": "1.4.3",
+    "adb_serial": "45ef5567472a8f0c"
   },
   "pci-0000:0c:00.3-usb-0:1.3.3:1.0": {
     "name": "扩展坞-1",
