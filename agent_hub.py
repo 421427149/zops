@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.7"
+HUB_VERSION = "3.8"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -980,6 +980,16 @@ function copyText(text){
  try{document.execCommand('copy');note('已复制 '+text.length+' 字')}
  catch(e){note('复制失败: 浏览器拦截, 请右键手动复制')}
  ta.remove();term.focus()}
+async function waitShellQuiet(tab,timeout=9000){
+ // 等板端 shell 提示符回来再发下一行——上一条命令的回显/ioctl 还在刷时灌下一行,
+ // 行会互相穿插断裂(实测: for 循环被撕成 done4:/sh:done4)。超时则照发(带警告)。
+ const s=state[tab];const t0=Date.now();
+ while(Date.now()-t0<timeout){
+  await sleep(200);
+  const tail=((s&&s.buf)||'').slice(-300).replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'');
+  if(/(^|[\r\n])[^\r\n]{0,80}[#$>]\s*$/.test(tail))return true}
+ return false}
+
 async function smartPaste(text){
  if(active===null||!text)return;
  lastPaste=text;
@@ -987,7 +997,10 @@ async function smartPaste(text){
  text=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
  const lines=text.split('\n');
  if(lines.length===1){                              // 单行: 原样进板端行编辑, 不自动执行
-  if(raw){rawSend(text);note('已粘贴单行(未执行, 回车才生效)')}
+  if(raw){
+   // 长行分片: 整块灌 1.5M 时板端 busybox 回显跟不上会丢字符/劈字(实测首行丢 f、中文断裂)
+   for(let j=0;j<text.length;j+=48){rawSend(text.slice(j,j+48));await sleep(12)}
+   note('已粘贴单行(未执行, 回车才生效)')}
   else{for(const ch of text)lineKey(ch)}
   return}
  // 多行: 板端支持 bracketed-paste(bash 提示符带 2004h)则整块包裹, 不然逐行限速
@@ -997,13 +1010,31 @@ async function smartPaste(text){
   note('已粘贴 '+lines.length+' 行(bracketed, 整块进板端, 回车才执行)');return}
  if(lines.length>6||text.length>2048){
   if(!confirm('将逐行发送 '+lines.length+' 行到板子(每行都会执行), 确认?'))return}
- note('逐行粘贴 '+lines.length+' 行(70ms/行, 防灌爆 UART)…');
+ // 多行文本先做**语义合并**: 把 for/if/while 与其 do/done、续行反斜杠等粘回单行,
+ // 否则逐行发给非续行模式的 shell(如 busybox ash)会把 for...do 单独执行报语法错
+ // (实测: 'for..;do' 单独一行 → syntax error near unexpected token)
+ let merged=[],buf='';
+ for(const raw2 of lines){
+  const t=raw2.trim();
+  if(buf){buf+=' '+raw2.trim();
+   if(/\b(done|fi|esac)\s*$/.test(buf)){merged.push(buf);buf=''}
+   continue}
+  if(/\b(do|then|else)\s*$/.test(t)||/&&\s*$/.test(t)||/\\\s*$/.test(t)||/[({]\s*$/.test(t)){
+   buf=t;continue}
+  merged.push(t)}
+ if(buf)merged.push(buf);
+ text=merged.join('\n');lines=merged;
+ note('合并为 '+merged.length+' 条语义语句, 逐条执行(每条等提示符)…');
  for(let i=0;i<lines.length;i++){
   const ln=lines[i];
-  if(raw){if(ln)rawSend(ln);rawSend('\r')}
+  if(raw){
+   for(let j=0;j<ln.length;j+=48){rawSend(ln.slice(j,j+48));await sleep(12)}
+   rawSend('\r');
+   const ok=await waitShellQuiet(active,15000);   // 复合语句(如 for 循环带 sleep)耗时长, 等待放宽
+   if(!ok)note('⚠ 第'+(i+1)+'条 15s 未见到提示符, 继续下一条')}
   else{lineKey('\r')}                              // 行模式旧实例: 只喂回车示意
-  await sleep(70)}
- note('粘贴完成')}
+ }
+ note('粘贴完成('+merged.length+' 条语句)')}
 term.attachCustomKeyEventHandler(ev=>{
  if(ev.type!=='keydown')return true;
  const sel=()=>term.getSelection();
