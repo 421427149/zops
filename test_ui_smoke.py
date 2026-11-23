@@ -64,6 +64,64 @@ def check_no_duplicate_defs(js):
     return True, f"{len(names)} 个函数无重复"
 
 
+def check_smartpaste_real(html):
+    """执行**线上页面真实提取**的 smartPaste(带桩), 断言语义合并与发送行为。
+
+    血训 2026-11-23: v3.8 的 const 重赋值让多行粘贴静默全死, 而当时的"验收"是
+    手抄副本+Python 旁路——都没跑真函数。本检查从页面抠出 waitShellQuiet+
+    smartPaste 原文, 在 node 里用桩执行用户真实命令, 任何运行期错误当场暴露。
+    """
+    import subprocess, tempfile
+    a = html.find("async function waitShellQuiet")
+    b = html.find("term.attachCustomKeyEventHandler")
+    if a < 0 or b < 0 or b <= a:
+        return False, "没找到 waitShellQuiet/smartPaste 代码段"
+    fn = html[a:b]
+    harness = (
+        "let sends=[],notes=[];\n"
+        "const sleep=async()=>{};\n"
+        "const note=m=>notes.push(m);\n"
+        "const rawSend=t=>sends.push(t);\n"
+        "const lineKey=()=>{};\n"
+        "let active=1, raw=true, lastPaste='';\n"
+        "const state={1:{buf:'x\\r\\nroot@t:/# ',pending:'',brl:false}};\n"
+        "const confirm=()=>true;\n"
+        + fn +
+        "\nsmartPaste(process.argv[2]).then(()=>{"
+        "  const stmts=sends.join('').split('\\r').filter(x=>x.trim());"
+        "  console.log(JSON.stringify({stmts,notes:notes.length,"
+        "    firstHasDone:/done/.test(stmts[0]||''),"
+        "    maxChunk:Math.max(...sends.map(x=>x.length))}));"
+        "},e=>{console.error('EXEC_FAIL:'+e.message);process.exit(1)});\n")
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                      encoding="utf-8")
+    tmp.write(harness); tmp.close()
+    cmd = 'for e in 1100 1200 1300 1400; do\n  v4l2-ctl -d /dev/v4l-subdev6 -c exposure=$e\n  echo "=== exposure=$e"\n  sleep 3\ndone'
+    try:
+        r = subprocess.run(["node", tmp.name, cmd], capture_output=True,
+                           text=True, timeout=25)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return True, "(无 node, 跳过 smartPaste 实跑——弱保证)"
+    if r.returncode != 0:
+        return False, f"smartPaste 运行期错误: {r.stderr.strip()[:200]}"
+    import json as _j
+    try:
+        out = _j.loads(r.stdout.strip().splitlines()[-1])
+    except ValueError:
+        return False, f"输出不可解析: {r.stdout[:150]!r} / {r.stderr[:150]!r}"
+    stmts = out.get("stmts", [])
+    if not stmts:
+        return False, "一条语句都没发出(粘贴静默失败)"
+    if not out.get("firstHasDone"):
+        return False, f"首条语句未合并完成(for..done 被拆开): {stmts[0][:80]!r}"
+    import re as _re
+    if not _re.search(r";\s*done\s*$", stmts[0] or ""):
+        return False, f"循环体行未用;连接(空格粘接是非法shell): {stmts[0][:100]!r}"
+    if out.get("maxChunk", 0) > 48:
+        return False, f"分片失效(最长片 {out['maxChunk']} 字 > 48)"
+    return True, f"{len(stmts)} 条语句, 首条含 done(合并✔), 最长片 {out['maxChunk']}字"
+
+
 def check_key_functions(html):
     """关键行为抽查: 翻译器 tl() 必须存在且语义正确。"""
     s, e = html.find("const TL="), html.find("function devOf")
@@ -155,6 +213,7 @@ def main():
     checks.append(("JS 语法", *check_syntax(js)))
     checks.append(("函数无重复定义", *check_no_duplicate_defs(js)))
     checks.append(("翻译器行为", *check_key_functions(html)))
+    checks.append(("smartPaste 实跑(真函数+桩)", *check_smartpaste_real(html)))
     checks.append(("选中标签高亮", *check_tab_highlight(js)))
     checks.append(("静态外链脚本", True,
                    ", ".join(re.findall(r'src="(/static/[^"]+)"', html)) or "无"))

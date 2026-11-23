@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.8"
+HUB_VERSION = "3.10"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -995,7 +995,9 @@ async function smartPaste(text){
  lastPaste=text;
  const s=state[active];
  text=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
- const lines=text.split('\n');
+ let lines=text.split('\n');                       // 必须 let: 语义合并段会整体重赋值
+                                                   // (const 时 lines=merged 抛 TypeError 且被
+                                                   //  async 静默吞掉, 表现为"粘贴无任何反应")
  if(lines.length===1){                              // 单行: 原样进板端行编辑, 不自动执行
   if(raw){
    // 长行分片: 整块灌 1.5M 时板端 busybox 回显跟不上会丢字符/劈字(实测首行丢 f、中文断裂)
@@ -1016,7 +1018,7 @@ async function smartPaste(text){
  let merged=[],buf='';
  for(const raw2 of lines){
   const t=raw2.trim();
-  if(buf){buf+=' '+raw2.trim();
+  if(buf){buf+=( /[;&&|{(\[]\s*$/.test(buf)?' ':'; ')+raw2.trim();   // 上一段已带 ; & | ( 等分隔符则空格, 否则补 '; '
    if(/\b(done|fi|esac)\s*$/.test(buf)){merged.push(buf);buf=''}
    continue}
   if(/\b(do|then|else)\s*$/.test(t)||/&&\s*$/.test(t)||/\\\s*$/.test(t)||/[({]\s*$/.test(t)){
