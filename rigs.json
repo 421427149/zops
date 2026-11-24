@@ -24,7 +24,7 @@
       "name": "3588 A",
       "console": "1.4.4",
       "baud": 1500000,
-      "adb_serial": "45ef5567472a8f0c",
+      "adb_serial": "ba27980e967d3a93",
       "alive_check": {
         "usb_vid_pid": "2207:0006",
         "note": "350b=Loader/MaskROM(两态同PID), 需 upgrade_tool ld 判 Mode; 系统活=0006"
@@ -113,9 +113,10 @@
       "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot",
       "download_chain": "1.3",
       "download_pid_now": "0006",
-      "adb_serial": "ba6abb3faca76ab6",
+      "adb_serial": "45ef5567472a8f0c",
       "download_bound_at": "2026-11-18 16:54",
-      "download_bound_by": "bind-dl 断电差分; 2026-11-21 14:01 adbq/lsusb 复核 SN=ba6abb3faca76ab6(旧记 45ef… 实为 A 板)"
+      "download_bound_by": "bind-dl 断电差分; 2026-11-21 14:01 adbq/lsusb 复核 SN=ba6abb3faca76ab6(旧记 45ef… 实为 A 板)",
+      "_note_20261124": "12V5 断电时 45ef gadget 不消失 → 此板电源线已被改接, rig-B 的 12V5 通道当前不控制它; console 线(1.2)亦断(板端写 console 主机侧收不到); 待重新接线后复验"
     },
     "verified": {
       "off": {

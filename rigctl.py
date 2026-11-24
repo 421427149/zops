@@ -498,20 +498,25 @@ def usb_mode_for(rig):
     扫 lsusb 的 350b/320b(需下载线接主机才可见, 无 upgrade_tool 时按 PID 口诀)。"""
     tgt = rig.get("target") or {}
     dl = tgt.get("download_chain")
-    if dl:                                        # 已绑定下载口: 直接看这个物理口
-        dev = _rk_usb_by_chain().get(dl)
-        if not dev:
-            return None                           # 口上无 2207(线未插/USB口通道未供电)
-        pid = dev["pid"]
-        extra = f", serial={dev['serial'][:12]}" if dev["serial"] else ""
-        return f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}{extra} @下载口{dl}"
+    # ① 序列号优先: 序列号烧在 SoC 里, 线挪到哪个口都追得到(2026-11-24 实测: 挪线后
+    #    登记口失效, 但按序列号扫总线立刻找到新口) —— 挪线自动适应的关键
     adb_serial = tgt.get("adb_serial", "")
     if adb_serial:
-        for line in _adb_devices_l().splitlines():
-            if adb_serial in line:
-                m = re.search(r"usb:\d+-([\d.]+)", line)
-                chain = m.group(1) if m else "?"
-                return f"运行态(adb@链路{chain}, 序列号匹配)"
+        for chain, dev in _rk_usb_by_chain().items():
+            if dev.get("serial") == adb_serial:
+                pid = dev["pid"]
+                moved = f"(口{dl}→{chain} 已自动追踪)" if dl and chain != dl else f"@口{chain}"
+                return (f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}"
+                        f", serial={adb_serial[:12]} {moved}")
+    if dl:                                        # ② 登记口兜底(无序列号/序列号没上线时)
+        dev = _rk_usb_by_chain().get(dl)
+        if dev:
+            if adb_serial and dev["serial"] and dev["serial"] != adb_serial:
+                return None    # 口上有 2207 但序列号是别的板(挪线后旧口被占) —— 不许冒领
+            pid = dev["pid"]
+            extra = f", serial={dev['serial'][:12]}" if dev["serial"] else ""
+            return f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}{extra} @下载口{dl}"
+        return None                               # 口上无 2207(线未插/USB口通道未供电)
     pids = re.findall(r"ID\s+2207:([0-9a-f]{4})", _lsusb(), re.I)
     download = [p.lower() for p in pids if p.lower() in ("350b", "320b")]
     if download:
