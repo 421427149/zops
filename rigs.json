@@ -33,12 +33,12 @@
       "bound_by": "线位互换实证(未再断电): 13:54:59 rig-A coldboot → 1.4.4 于 13:55:06 起收启动日志; adbq/lsusb 显示 1.4.3 的 2207:0006 iSerial=45ef5567472a8f0c",
       "enter_loader_cmd": "reboot loader",
       "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot",
-      "download_chain": "1.4.3",
       "download_pid_now": "0006",
       "download_bound_at": "2026-11-21 14:02",
       "download_bound_by": "同一轮线位互换实证: USB 与串口对调, 1.4.3 现为 A 板下载口",
       "console_relocated_at": "2026-11-25 11:43",
-      "console_relocated_from": "1.4.3"
+      "console_relocated_from": "1.4.3",
+      "download_note": "下载口暂无可靠实证(2026-11-25 两次登记均有误): 以序列号 ba27980e967d3a93 为准自动追踪; 线接上后跑 `rigctl rig-A bind-dl` 落盘口位"
     },
     "_history": [
       {
@@ -57,33 +57,7 @@
         "note": "两根线对调: 冷启动后 1.4.4 出启动日志、1.4.3 的 USB iSerial=45ef…; 登记改为 console@1.4.4 / download@1.4.3"
       }
     ],
-    "verified": {
-      "off": {
-        "ok": true,
-        "at": "2026-11-13 18:22",
-        "evidence": "控制台 rc=0"
-      },
-      "on": {
-        "ok": true,
-        "at": "2026-11-13 18:22",
-        "evidence": "控制台 rc=0"
-      },
-      "coldboot": {
-        "ok": true,
-        "at": "2026-11-13 18:20",
-        "evidence": "串口新增 5858 字节(板子重启)"
-      },
-      "enter-loader": {
-        "ok": false,
-        "at": "2026-11-13 18:21",
-        "evidence": "未见 350b"
-      },
-      "catch-uboot": {
-        "ok": false,
-        "at": "2026-11-13 18:23",
-        "evidence": "未见 350b"
-      }
-    }
+    "verified_note": "2026-11-25 清除了 11-13 的旧验证结论: 当时的 Loader 判定只看'总线上有无 350b'(不分板, 两板同在时不可靠), 且 rig-A 的 ✘ 实为'下载线未接无法验证'而非失败。现判定已改为按本板序列号; 下载线接上后重跑 `rigctl <rig> verify --recover`"
   },
   "rig-B": {
     "controller": {
@@ -122,32 +96,6 @@
       "console_relocated_at": "2026-11-25 11:42",
       "console_relocated_from": "1.2"
     },
-    "verified": {
-      "off": {
-        "ok": true,
-        "at": "2026-11-13 18:12",
-        "evidence": "通道回读 st=0"
-      },
-      "on": {
-        "ok": true,
-        "at": "2026-11-13 18:13",
-        "evidence": "通道回读 st=1"
-      },
-      "coldboot": {
-        "ok": true,
-        "at": "2026-11-13 18:13",
-        "evidence": "串口新增 51776 字节(板子重启)"
-      },
-      "enter-loader": {
-        "ok": true,
-        "at": "2026-11-13 18:18",
-        "evidence": "lsusb 2207:350b"
-      },
-      "catch-uboot": {
-        "ok": true,
-        "at": "2026-11-13 18:15",
-        "evidence": "lsusb 2207:350b"
-      }
-    }
+    "verified_note": "2026-11-25 清除了 11-13 的旧验证结论: 当时的 Loader 判定只看'总线上有无 350b'(不分板, 两板同在时不可靠), 且 rig-A 的 ✘ 实为'下载线未接无法验证'而非失败。现判定已改为按本板序列号; 下载线接上后重跑 `rigctl <rig> verify --recover`"
   }
 }

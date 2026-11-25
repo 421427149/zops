@@ -847,6 +847,23 @@ def _usb_has(pid):
                for x in re.findall(r"2207:([0-9a-f]{4})", _lsusb(), re.I))
 
 
+def _rig_in_mode(rig, pid):
+    """**本 rig 登记的那块板**是否处于该 USB 模式(Loader=350b)。
+
+    必须按序列号认主: 只看"总线上有没有 350b"的话, 别的板在 Loader 态就会让
+    本 rig 的验证误判为通过(两块板都在时必然撞号)。
+    """
+    tgt = rig.get("target") or {}
+    sn = tgt.get("adb_serial")
+    devs = _rk_usb_by_chain()
+    if sn:
+        return any(d["pid"].lower() == pid.lower() and d["serial"] == sn
+                   for d in devs.values())
+    dl = tgt.get("download_chain")             # 无序列号: 退回登记口(弱证据)
+    d = devs.get(dl) if dl else None
+    return bool(d and d["pid"].lower() == pid.lower())
+
+
 def act_bind_download(rig_name, rig, rigs_path, all_rigs):
     """绑定受控板的 USB 下载口(烧录口): 断电差分, 结论写回 rigs.json/boards.json。
 
@@ -977,12 +994,12 @@ def act_verify(rig_name, rig, rigs_path, all_rigs, only=None, recover=False):
                   why = f"串口新增 {grew} 字节(板子重启)" if ok else "40s 内串口无新增"
               elif act == "enter-loader":
                   act_enter_loader(rig_name, rig)
-                  ok = _usb_has("350b")
+                  ok = _rig_in_mode(rig, "350b")   # 按本 rig 的板判定, 不看总线上任意 350b
                   why = "lsusb 2207:350b" if ok else \
                       "未见 350b —— 若下载线未接主机则无法验证(命令本身可能已生效)"
               elif act == "catch-uboot":
                   act_catch_uboot(rig_name, rig, select_usb=True)
-                  ok = _usb_has("350b")
+                  ok = _rig_in_mode(rig, "350b")   # 按本 rig 的板判定, 不看总线上任意 350b
                   why = "lsusb 2207:350b" if ok else \
                       "未见 350b —— 该板 U-Boot 可能无 autoboot 倒计时(按键会直接落到 Linux shell)"
               else:
@@ -1128,6 +1145,36 @@ def act_bind(rig_name, rig, rigs_path, all_rigs):
 
 # ---------------------------------------------------------------- 入口
 
+def registry_sanity(rigs=None):
+    """登记表自检: 找出物理上不可能/自相矛盾的登记, 返回问题列表(空=没问题)。
+
+    曾经手滑把 rig-A 的 download_chain 写成和 console 同一个口(1.4.3)——串口线和
+    USB 下载线不可能插在同一个物理口。这类笔误不会报错, 只会让"按登记口兜底"
+    的判断悄悄失效, 所以单独查。
+    """
+    rigs = rigs if rigs is not None else load_rigs(RIGS_DEFAULT)
+    problems = []
+    for name, rig in rigs.items():
+        t = rig.get("target") or {}
+        c, dl = t.get("console"), t.get("download_chain")
+        if c and dl and c == dl:
+            problems.append(f"{name}: 控制台口与下载口登记成了同一个口({c}) —— 物理上不可能, "
+                            f"请核对后改 rigs.json 的 target.download_chain")
+    # 跨 rig: 一个物理口只能插一根线(串口线/下载线各算), 两个 rig 登记同一个口必有一错
+    owners = {}
+    for name, rig in rigs.items():
+        t = rig.get("target") or {}
+        for kind, key in (("控制台", "console"), ("下载口", "download_chain")):
+            v = t.get(key)
+            if v:
+                owners.setdefault(v, []).append(f"{name}.{kind}")
+    for port, who in owners.items():
+        if len(who) > 1:
+            problems.append(f"物理口 {port} 被重复登记: {who} —— 一个口只能插一根线, "
+                            f"必有一处是过期的, 请按序列号追踪/差分结果更正")
+    return problems
+
+
 def selftest():
     assert hub_chain("pci-0000:0c:00.3-usb-0:1.4.2:1.0-port0") == "1.4.2"
     assert hub_chain("1.4.2") == "1.4.2"
@@ -1147,6 +1194,21 @@ def selftest():
         print(f"selftest OK: 链路归一化/节点解析({c}→{n})/匹配 全过")
     else:
         print("selftest OK: 链路归一化/匹配 全过 (无 by-path 适配器, 跳过节点解析)")
+
+    # 登记表自检: 控制台口 ≠ 下载口(手滑写成同口曾让按口兜底悄悄失效)
+    bad = registry_sanity({"rig-X": {"target": {"console": "1.4", "download_chain": "1.4"}},
+                           "rig-Y": {"target": {"console": "1.2", "download_chain": "1.3"}}})
+    assert bad and any("rig-X" in x and "同一个口" in x for x in bad), bad
+    assert registry_sanity({"rig-Y": {"target": {"console": "1.2", "download_chain": "1.3"}}}) == []
+    # 跨 rig 重复登记同一个口
+    dup = registry_sanity({"rig-P": {"target": {"console": "1.2", "download_chain": "1.3"}},
+                           "rig-Q": {"target": {"console": "1.4", "download_chain": "1.3"}}})
+    assert len(dup) == 1 and "重复登记" in dup[0], dup
+    real_bad = registry_sanity()
+    if real_bad:
+        print("⚠ 登记表自检发现问题:")
+        for x in real_bad:
+            print("   ", x)
 
 
 def main():

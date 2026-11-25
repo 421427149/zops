@@ -640,6 +640,32 @@ def test_port_matches_strict(w):
         pass
 
 
+@case("verify 的 Loader 判定: 别的板在 Loader 态时, 本 rig 不得被判为通过")
+def test_rig_in_mode_ownership(w):
+    _bind_all(w)
+    w.boards["B"].dl_port = "1.3"                 # B 在 1.3, 进 Loader 态
+    R._rk_usb_by_chain = lambda: {"1.3": {"pid": "350b", "serial": w.boards["B"].serial}}
+    rigs = R.load_rigs(R.RIGS_DEFAULT)
+    assert R._rig_in_mode(rigs["rig-B"], "350b") is True, "自己的板在 Loader, 应判通过"
+    assert R._rig_in_mode(rigs["rig-A"], "350b") is False, \
+        "A 的板根本不在线, 却因为总线上有 B 的 350b 被判为通过(撞号)"
+    # 两块板都在, 只有 A 在 Loader
+    R._rk_usb_by_chain = lambda: {"1.4.4": {"pid": "350b", "serial": w.boards["A"].serial},
+                                  "1.3": {"pid": "0006", "serial": w.boards["B"].serial}}
+    assert R._rig_in_mode(rigs["rig-A"], "350b") is True
+    assert R._rig_in_mode(rigs["rig-B"], "350b") is False
+    # 运行态不算 Loader
+    R._rk_usb_by_chain = lambda: {"1.4.4": {"pid": "0006", "serial": w.boards["A"].serial}}
+    assert R._rig_in_mode(rigs["rig-A"], "350b") is False
+    # MaskROM(320b) 与 Loader(350b) 不混
+    R._rk_usb_by_chain = lambda: {"1.4.4": {"pid": "320b", "serial": w.boards["A"].serial}}
+    assert R._rig_in_mode(rigs["rig-A"], "350b") is False
+    assert R._rig_in_mode(rigs["rig-A"], "320b") is True
+    # 同口但序列号是别人的 → 不算
+    R._rk_usb_by_chain = lambda: {"1.3": {"pid": "350b", "serial": "someoneelse0000"}}
+    assert R._rig_in_mode(rigs["rig-B"], "350b") is False, "同口不同序列号被当成了本板"
+
+
 # ----------------------------------------------------------------- main
 
 def run_one(name):

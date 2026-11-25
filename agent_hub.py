@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.11"
+HUB_VERSION = "3.12"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -516,6 +516,27 @@ class Hub:
                                "tab": thit["agent_port"] if thit else None,
                                "usb": mode, "enter_loader_cmd": tgt.get("enter_loader_cmd")}
             entry["verified"] = rig.get("verified") or {}
+            # 烧录目标: 把"刷哪块板"直接给出来(序列号烧在 SoC 里, 是烧录工具 -s / 过滤
+            # 的唯一可靠依据)。烧录会话此前拿不到这个信息, 只好自己按类型找 2207 →
+            # 撞号。这里明确三态: 就绪 / 离线 / 未登记。
+            tgt_all = tgt
+            dl, sn = tgt_all.get("download_chain"), tgt_all.get("adb_serial")
+            mode = entry["target"].get("usb")
+            if sn and mode and not str(mode).startswith(("?", "✘")):
+                state = "ready" if "350b" in str(mode) or "320b" in str(mode) else "system"
+            elif sn:
+                state = "offline"
+            else:
+                state = "unbound"
+            entry["flash"] = {
+                "state": state,                # ready=已在Loader可烧 / system=运行态需先进loader /
+                                                # offline=下载线未接或板子没电 / unbound=未登记序列号
+                "serial": sn or None,          # 烧录工具按它寻址: upgrade_tool / rkdeveloptool 的设备选择
+                "download_chain": dl,
+                "board": tgt_all.get("name"),
+                "how": ("lsusb 找 serial 匹配的 2207:350b 即为烧录目标; "
+                        "用 upgrade_tool 前先核对该设备 serial"),
+            }
             entry["last"] = self._rig_out.get(name)
             out.append(entry)
         return out

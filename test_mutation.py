@@ -57,6 +57,11 @@ MUTS = [
     ("rigctl.py", 'if quiet and burst:', '            if quiet or burst:', "证据B and→or"),
     ("rigctl.py", 'if quiet and burst:', '            if True:', "证据B 恒真"),
     ("rigctl.py", 'if quiet and burst:', '            if False:', "证据B 恒假"),
+    # ---- _rig_in_mode: verify 的 Loader 判定必须认主 ----
+    ("rigctl.py", 'return any(d["pid"].lower() == pid.lower() and d["serial"] == sn',
+     '        return any(d["pid"].lower() == pid.lower() or d["serial"] == sn', "Loader判定 and→or(别人的板也算)"),
+    ("rigctl.py", 'return any(d["pid"].lower() == pid.lower() and d["serial"] == sn',
+     '        return any(d["pid"].lower() == pid.lower() and (d["serial"] == sn or True)', "Loader判定丢掉序列号(按类型认领)"),
     # ---- 其它核心 ----
     ("rigctl.py", 'return bool(np and nk and np == nk)', '    return bool(np or nk or np == nk)', "口匹配 and→or(任何实例冒充任何登记)"),
     ("rigctl.py", 'read().strip() != "2207":',
