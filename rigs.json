@@ -22,7 +22,7 @@
     },
     "target": {
       "name": "3588 A",
-      "console": "1.4.4",
+      "console": "1.4.3",
       "baud": 1500000,
       "adb_serial": "ba27980e967d3a93",
       "alive_check": {
@@ -36,7 +36,9 @@
       "download_chain": "1.4.3",
       "download_pid_now": "0006",
       "download_bound_at": "2026-11-21 14:02",
-      "download_bound_by": "同一轮线位互换实证: USB 与串口对调, 1.4.3 现为 A 板下载口"
+      "download_bound_by": "同一轮线位互换实证: USB 与串口对调, 1.4.3 现为 A 板下载口",
+      "console_relocated_at": "2026-11-25 11:30",
+      "console_relocated_from": "1.4.4"
     },
     "_history": [
       {

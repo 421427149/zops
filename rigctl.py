@@ -16,6 +16,7 @@
                                #   --only off,on 只验部分; --recover 验完冷启动回系统
     rigctl rig-A catch-uboot   # 救砖: 冷启动+连发Ctrl+C抓U-Boot菜单+选[3]进Loader
                                #   (内核已panic时唯一入口; 加 --menu 停在菜单不选)
+    rigctl rig-A relocate      # 控制台口被挪走后重新定位(电力差分, 会重启板子)并回写
     rigctl rig-A bind-dl       # 绑定USB下载口(断电差分), 会开USB口通道并重启板子
     rigctl rig-A bind          # 重探测受控板: 关电盯哪个串口灭→开电盯哪个醒,
                                # 结论自动写回 rigs.json 的 target(换板/挪线后跑这个)
@@ -159,6 +160,96 @@ def find_instance(console_key):
             return tab["agent_port"], tab
     return None
 
+
+def find_target_instance(rig_name, rig, rigs_path=None, all_rigs=None):
+    """受控板串口实例: 登记口在 → 直接用; 不在 → 电力差分自动重定位并回写。
+
+    所有需要往受控板发命令的路径(status/enter-loader/catch-uboot/verify)都走这里,
+    保证"线挪了"之后 rig 仍然指向**自己那块板**的串口, 不会借用别的口。
+    """
+    key = console_chain_of_rig(rig, "target")
+    hit = find_instance(key) if key else None
+    if hit:
+        return hit
+    if not key or (rig.get("target") or {}).get("console_missing_at"):
+        pass
+    try:
+        return relocate_console(rig_name, rig, rigs_path, all_rigs)
+    except SystemExit as e:
+        raise RigError(3, f"{rig_name}: 登记控制台口 {key} 无实例, 且自动重定位失败({e})")
+
+
+def _probe_uptime(ap):
+    """问板子 uptime 秒数(应答 `__UP_<n>__`); 板子没 shell/超时返回 None。"""
+    try:
+        base = _api(f"http://127.0.0.1:{ap}", "GET", "/api/info")["data"]["capture_bytes"]
+        _api(f"http://127.0.0.1:{ap}", "POST", "/api/tabs/0/send",
+             {"text": "echo __UP_$(cut -d. -f1 /proc/uptime)__"})
+        time.sleep(1.6)
+        d = _api(f"http://127.0.0.1:{ap}", "GET",
+                 f"/api/tabs/0/receive?offset={base}&max_bytes=800")["data"]
+        m = re.search(r"__UP_(\d+)__", d.get("text") or "")
+        return int(m.group(1)) if m else None
+    except Exception as e:                      # 记下来, 不静默
+        print(f"[relocate] uptime 探针 @{ap} 失败: {e}", flush=True)
+        return None
+
+
+def relocate_console(rig_name, rig, rigs_path=None, all_rigs=None):
+    """登记的控制台口失效时(线被挪走), 用**电力差分**把控制台重新找出来并回写。
+
+    判据 = uptime 归零: 断电前逐个探 `/proc/uptime`, 上电后 uptime 变小的那个口
+    就是本 rig 供电的板(硬证据, 不依赖"账本增长"——启动日志可能几秒内流完,
+    按字节数采样会漏, 2026-11-25 实测)。
+    没法探 uptime 的口(卡在 emergency shell / 还没起系统)退回账本差分兜底。
+    """
+    p = (rig.get("controller") or {}).get("power") or {}
+    tabs = hub_tabs()
+    aps = [t["agent_port"] for t in tabs]
+    before = {ap: _probe_uptime(ap) for ap in aps}
+    cap0 = {}
+    for t in tabs:
+        try:
+            cap0[t["agent_port"]] = _api(f"http://127.0.0.1:{t['agent_port']}", "GET",
+                                         "/api/info")["data"]["capture_bytes"]
+        except Exception as e:
+            print(f"[relocate] 读账本 @{t['agent_port']} 失败: {e}", flush=True)
+    act_power(rig_name, rig, p.get("off_value", 0), "关机[重定位控制台]")
+    time.sleep(6)
+    act_power(rig_name, rig, p.get("on_value", 1), "开机[重定位控制台]")
+    time.sleep(14)                               # 等它起到 shell 再探
+    hit = None
+    for _ in range(12):                          # 最多再等 ~36s
+        for ap in aps:
+            now = _probe_uptime(ap)
+            if now is not None and before.get(ap) is not None and now < before[ap]:
+                hit = ap; break
+        if hit:
+            break
+        time.sleep(3)
+    if not hit:                                  # 兜底: 账本灌入型(系统没起到 shell)
+        for ap in aps:
+            try:
+                n = _api(f"http://127.0.0.1:{ap}", "GET", "/api/info")["data"]["capture_bytes"]
+            except Exception as e:
+                print(f"[relocate] 读账本 @{ap} 失败: {e}", flush=True); continue
+            if cap0.get(ap) is not None and n - cap0[ap] > 5000:
+                hit = ap; break
+    if not hit:
+        raise RigError(4, f"{rig_name}: 断电重启后没有串口的 uptime 归零, 无法重定位控制台"
+                          "(电源线是否还接在控制器上?)")
+    tab = next((t for t in hub_tabs() if t["agent_port"] == hit), None)
+    if not tab:
+        raise RigError(4, "找到目标但 hub 里查不到该实例")
+    chain = hub_chain(tab["port"]) or tab["port"]
+    old = (rig.get("target") or {}).get("console")
+    rig.setdefault("target", {})["console"] = chain
+    rig["target"]["console_relocated_at"] = time.strftime("%Y-%m-%d %H:%M")
+    rig["target"]["console_relocated_from"] = old
+    if rigs_path and all_rigs is not None:
+        save_rigs(rigs_path, all_rigs)
+    print(f"{rig_name}: ✔ 控制台重定位 {old} → {chain} (实例{hit}, uptime 归零实证)", flush=True)
+    return hit, tab
 
 def send_and_read(agent_port, cmd, settle=SETTLE_S):
     """经实例向控制台发一行命令, 读回尾窗文本(含回显)。"""
@@ -419,9 +510,7 @@ def act_enter_loader(rig_name, rig):
     依据本 SDK rk3588s.dtsi 的 reboot-mode 节点: mode-loader=BOOT_BL_DOWNLOAD,
     `reboot loader` 是内核正式支持路径; MaskROM 无软件入口(mode-maskrom 不存在)。
     """
-    thit = find_instance(console_chain_of_rig(rig, "target"))
-    if not thit:
-        raise RigError(3, "受控板控制台无在线实例, 无法下发 reboot loader")
+    thit = find_target_instance(rig_name, rig)   # 登记口失效时自动重定位(线被挪走)
     ap = thit[0]
     base = f"http://127.0.0.1:{ap}"
     print(f"{rig_name}: 等 shell 提示符就绪(最多 90s; 刚起来时命令会被启动日志吞掉)...",
@@ -618,9 +707,7 @@ def act_catch_uboot(rig_name, rig, select_usb=True):
     成功率取决于 CH340 恢复速度: 目标板供电的适配器在断电期间掉线, 上电后要等
     它重新枚举并打开, 这期间倒计时可能已过——故上电后先等实例 open, 再密集 spam。
     """
-    thit = find_instance(console_chain_of_rig(rig, "target"))
-    if not thit:
-        raise RigError(3, "受控板控制台无在线实例(先让 keeper/实例起来)")
+    thit = find_target_instance(rig_name, rig)   # 登记口失效时自动重定位
     ap = thit[0]
     base = f"http://127.0.0.1:{ap}"
     p = rig["controller"]["power"]
@@ -1066,6 +1153,8 @@ def main():
         act_catch_uboot(name, rig, select_usb="--menu" not in args)
     elif action == "bind-dl":
         act_bind_download(name, rig, rigs_path, rigs)
+    elif action == "relocate":
+        find_target_instance(name, rig, rigs_path, rigs) or relocate_console(name, rig, rigs_path, rigs)
     elif action == "verify":
         only = None
         if "--only" in args:

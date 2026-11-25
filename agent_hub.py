@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.10"
+HUB_VERSION = "3.11"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -495,6 +495,10 @@ class Hub:
                     "ok": bool(tab), "detail": f"实例{tab['agent_port']} @{tab['baud']}" if tab else "无实例",
                     "tab": tab["agent_port"] if tab else None}
             thit = self._tab_by_console(R, tgt.get("console"))
+            if not thit:
+                # 登记口失效(线被挪): 给出明确指引, 而不是让下游会话去借别的 tab
+                entry["target_hint"] = (f"登记控制台口 {tgt.get('console')} 无实例——"
+                    f"跑 `python3 rigctl.py {name} relocate` 自动重定位(会重启该板)")
             cached = self._usb_cache.get(name)
             if cached and tnow - cached[0] < 10:
                 mode = cached[1]
