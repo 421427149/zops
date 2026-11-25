@@ -55,31 +55,58 @@ def hub_chain_of_key(key):
     return segs[1] if len(segs) > 1 else segs[0]
 
 
-def load_chain_names(boards_path):
-    """boards.json -> {链路段: 板名}; 同名多键(过渡键+by-path 键)后者覆盖前者即可。"""
-    try:
-        with open(boards_path, encoding="utf-8") as f:
-            mapping = json.load(f)
-    except (OSError, ValueError) as e:
-        print(f"[adbq] boards.json 读取失败: {e}", file=sys.stderr)
-        return {}
-    chain_names = {}
+def load_boards(boards_path, rigs_path=None):
+    """板名登记 → {板名: {"serial": SoC序列号或None, "chains": [下载口链路…]}}
+
+    身份依据优先级(与 rigctl.usb_mode_for 同一套, 避免两处各说各话):
+      ① 序列号(烧在 SoC 里, 线挪到哪都追得到) —— rigs.json 的 target.adb_serial
+         (电力差分实证) 优先, 其次 boards.json 的 adb_serial;
+      ② 下载口链路 boards.json 的 download_chain;
+      ③ 板名条目的键(控制台口) —— 仅兜底"adb 线与控制台同口"的旧布局。
+    rigs.json 与 boards.json 不一致时(线被挪过、只更新了一边), 序列号说了算。
+    """
+    def read(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+    mapping = read(boards_path)
+    boards = {}
     for key, entry in mapping.items():
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not entry.get("name"):
             continue
-        name = entry.get("name")
-        if not name:
+        b = boards.setdefault(entry["name"], {"serial": None, "chains": []})
+        if entry.get("adb_serial"):
+            b["serial"] = entry["adb_serial"]
+        if entry.get("download_chain"):
+            b["chains"].append(entry["download_chain"])
+        ch = hub_chain_of_key(key)
+        if ch:
+            b["chains"].append(ch)
+    if rigs_path is None:
+        rigs_path = os.path.join(os.path.dirname(os.path.abspath(boards_path)), "rigs.json")
+    for rig in read(rigs_path).values():
+        if not isinstance(rig, dict):
             continue
-        # 优先用 download_chain(板子 USB 下载/adb 设备真正所在的口, 由 bind-dl 差分
-        # 实证); 控制台口与下载口通常不是同一个口, 旧逻辑拿键(控制台口)去对 adb
-        # 设备的 usb 链路只在两口同位时碰巧成立(2026-11-18 实测破产)
-        dl = entry.get("download_chain")
-        if dl:
-            chain_names[dl] = name
-        chain = hub_chain_of_key(key)
-        if chain and chain not in chain_names:
-            chain_names[chain] = name      # 兜底: adb 线恰好与控制台同口的旧布局
-    return chain_names
+        t = rig.get("target") or {}
+        name, sn = t.get("name"), t.get("adb_serial")
+        if not name or not sn:
+            continue
+        b = boards.setdefault(name, {"serial": None, "chains": []})
+        b["serial"] = sn                        # rigs.json(差分实证)优先
+        if t.get("download_chain") and t["download_chain"] not in b["chains"]:
+            b["chains"].append(t["download_chain"])
+    return boards
+
+
+def load_chain_names(boards_path):
+    """兼容旧调用: {链路: 板名}(仅用于 `adbq boards` 的展示)。"""
+    out = {}
+    for name, b in load_boards(boards_path).items():
+        for c in b["chains"]:
+            out.setdefault(c, name)
+    return out
 
 
 def adb_devices():
@@ -107,31 +134,45 @@ def adb_devices():
     return devices
 
 
-def resolve(board, devices, chain_names):
-    """板名(或唯一前缀) -> 目标设备; 解析不出/不唯一时给出可执行的报错。"""
-    names = sorted({n for n in chain_names.values() if n})
+def resolve(board, devices, boards):
+    """板名(或唯一前缀) -> 目标设备; 身份以序列号为准, 链路仅兜底。
+
+    解析不出/不唯一/不在线时给出可执行的报错。
+    """
+    names = sorted(boards)
     candidates = [n for n in names if n.startswith(board)]
     if not candidates:
-        raise SystemExit(f"[adbq] boards.json 里没有板名 {board!r}(现有: {', '.join(names) or '无'})")
+        raise SystemExit(f"[adbq] 登记里没有板名 {board!r}(现有: {', '.join(names) or '无'})")
     if len(candidates) > 1:
         raise SystemExit(f"[adbq] 前缀 {board!r} 歧义: {candidates}, 请写全名")
-    target_name = candidates[0]
-    chains = [c for c, n in chain_names.items() if n == target_name]
-    hits = [d for d in devices if d["chain"] in chains]
+    target = candidates[0]
+    info = boards[target]
+    want = info.get("serial")
+    if want:                                     # ① 序列号: 线挪到哪都认得
+        for d in devices:
+            if d["serial"] == want:
+                return target, d
+        online = ", ".join(f"{d['serial'][:12]}@{d['chain']}" for d in devices) or "无设备在线"
+        raise SystemExit(f"[adbq] 板 {target}(serial={want[:12]}) 不在线(在线: {online}); "
+                         "线被挪/板子未上电/未进系统时属正常")
+    hits = [d for d in devices if d["chain"] in info["chains"]]   # ② 链路兜底
     if not hits:
         online = ", ".join(f"{d['chain'] or '?'}({d['serial'][:12]})" for d in devices) or "无设备在线"
-        raise SystemExit(f"[adbq] 板 {target_name} 不在线(在线: {online}); "
-                         "usb 链路对不上时先跑 adbq boards 核对")
+        raise SystemExit(f"[adbq] 板 {target} 不在线(在线: {online}); "
+                         "该板未登记序列号——跑 rigctl <组合名> bind-dl 后按序列号寻址更可靠")
     if len(hits) > 1:
-        serials = [d["serial"] for d in hits]
-        raise SystemExit(f"[adbq] 链路 {chains} 竟命中多台(序列号 {serials}), "
-                         "物理插口异常, 请人工核对 adbq boards")
-    return target_name, hits[0]
+        raise SystemExit(f"[adbq] 板 {target} 的链路 {info['chains']} 命中多台"
+                         f"({[d['serial'] for d in hits]}), 请人工核对 adbq boards")
+    return target, hits[0]
 
 
 def cmd_boards(boards_path):
     devices = adb_devices()
-    chain_names = load_chain_names(boards_path)
+    boards = load_boards(boards_path)
+    chain_names = {}
+    for name, bi in boards.items():
+        for c in bi["chains"]:
+            chain_names.setdefault(c, name)
     if not devices:
         print("(无 adb 设备在线)")
         return
@@ -152,22 +193,38 @@ def selftest():
     key = "pci-0000:0c:00.3-usb-0:1.4.4:1.0-port0"
     assert hub_chain_of_key(key) == "1.4.4", hub_chain_of_key(key)
     assert hub_chain_of_key("ttyUSB0") is None
-    chain_names = {"1.2": "TQ3588", "1.4.4": "TQ3588B", "1.4.1": "TQ3562"}
-    # 两台同序列号的 RK 板, 靠链路区分——正是本工具的存在意义
+    # 无序列号的板(只能靠链路): 两台同序列号 RK 板靠物理口区分
+    boards = {"TQ3588": {"serial": None, "chains": ["1.2"]},
+              "TQ3588B": {"serial": None, "chains": ["1.4.4"]},
+              "TQ3562": {"serial": None, "chains": ["1.4.1"]}}
     devices = [{"serial": "20080411", "state": "device", "usb": "1-1.4.4",
                 "model": None, "product": None, "chain": "1.4.4"},
                {"serial": "20080411", "state": "device", "usb": "1-1.4.1",
                 "model": None, "product": None, "chain": "1.4.1"}]
-    name, dev = resolve("TQ3562", devices, chain_names)
-    assert (name, dev["serial"], dev["chain"]) == ("TQ3562", "20080411", "1.4.1")
-    name, dev = resolve("TQ3588B", devices, chain_names)
+    name, dev = resolve("TQ3562", devices, boards)
+    assert (name, dev["chain"]) == ("TQ3562", "1.4.1")
+    name, dev = resolve("TQ3588B", devices, boards)
     assert dev["chain"] == "1.4.4", "同序列号必须仍能选中对的板"
     try:
-        resolve("TQ3588", devices, chain_names)   # TQ3588 是 TQ3588B 的前缀但也是全名?
+        resolve("TQ3588", devices, boards)       # TQ3588 是 TQ3588B 的前缀但也是全名
         raise AssertionError("前缀歧义未报错")
     except SystemExit as e:
         assert "歧义" in str(e), e
-    print("selftest OK: 链路解析/重复序列号消歧/前缀歧义 全部通过")
+    # 有序列号的板: 线挪到别的口, 登记链路已过期, 仍按序列号找对
+    boards2 = {"3588 A": {"serial": "ba27", "chains": ["1.3"]},
+               "3588 B": {"serial": "45ef", "chains": ["1.4.4"]}}
+    moved = [{"serial": "45ef", "chain": "1.3"}, {"serial": "ba27", "chain": "1.4.4"}]
+    for nm, want in (("3588 A", "ba27"), ("3588 B", "45ef")):
+        _, d = resolve(nm, moved, boards2)
+        assert d["serial"] == want, f"{nm} 解析到了 {d['serial']}"
+    # 登记口被别人的板占了且本板没序列号 → 不认领(报不在线)
+    boards3 = {"X": {"serial": None, "chains": ["1.3"]}, "Y": {"serial": None, "chains": []}}
+    try:
+        resolve("Y", [{"serial": "zz", "chain": "1.3"}], boards3)
+        raise AssertionError("未登记链路的板不该命中任何设备")
+    except SystemExit as e:
+        assert "不在线" in str(e), e
+    print("selftest OK: 链路解析/重复序列号消歧/前缀歧义/序列号追踪挪线/不认领 全部通过")
 
 
 def main():
@@ -194,8 +251,8 @@ def main():
         dry = True
         adb_args = adb_args[1:]
     devices = adb_devices()
-    chain_names = load_chain_names(boards_path)
-    name, dev = resolve(board, devices, chain_names)
+    boards = load_boards(boards_path)
+    name, dev = resolve(board, devices, boards)
     cmd = [ADB, "-s", dev["serial"], *adb_args]
     if dry:
         print(" ".join(cmd))

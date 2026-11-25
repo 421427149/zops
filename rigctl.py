@@ -198,46 +198,65 @@ def _probe_uptime(ap):
 def relocate_console(rig_name, rig, rigs_path=None, all_rigs=None):
     """登记的控制台口失效时(线被挪走), 用**电力差分**把控制台重新找出来并回写。
 
-    判据 = uptime 归零: 断电前逐个探 `/proc/uptime`, 上电后 uptime 变小的那个口
-    就是本 rig 供电的板(硬证据, 不依赖"账本增长"——启动日志可能几秒内流完,
-    按字节数采样会漏, 2026-11-25 实测)。
-    没法探 uptime 的口(卡在 emergency shell / 还没起系统)退回账本差分兜底。
+    只认**观察到的重启事件**, 两个判据都要满足因果:
+      (a) uptime 证据: 断电前能探到 uptime u0(板子当时活着), 上电后探到 u1,
+          且 u1 明显小于"没断过电应有的值"(u0 + 流逝时间) → 它被重启过;
+      (b) 灌入证据(板子没起到 shell, 探不到 uptime 时): 断电期间账本**静止**,
+          上电之后才灌入大量启动日志 → 它是刚上电的。
+    探不到 uptime(0/None)、断电期间仍在吐字的口一律**不算**——否则任何一块
+    没电/假死的板都可能被认领(2026-11-25 拓扑回归实测)。
+    找不到就明确失败, 绝不退而求其次指到别的板。
     """
     p = (rig.get("controller") or {}).get("power") or {}
-    tabs = hub_tabs()
-    aps = [t["agent_port"] for t in tabs]
+
+    def caps():
+        out = {}
+        for t in hub_tabs():
+            try:
+                out[t["agent_port"]] = _api(f"http://127.0.0.1:{t['agent_port']}", "GET",
+                                            "/api/info")["data"]["capture_bytes"]
+            except Exception as e:
+                print(f"[relocate] 读账本 @{t['agent_port']} 失败: {e}", flush=True)
+        return out
+
+    aps = [t["agent_port"] for t in hub_tabs()]
+    t0 = time.time()
     before = {ap: _probe_uptime(ap) for ap in aps}
-    cap0 = {}
-    for t in tabs:
-        try:
-            cap0[t["agent_port"]] = _api(f"http://127.0.0.1:{t['agent_port']}", "GET",
-                                         "/api/info")["data"]["capture_bytes"]
-        except Exception as e:
-            print(f"[relocate] 读账本 @{t['agent_port']} 失败: {e}", flush=True)
+    c0 = caps()
     act_power(rig_name, rig, p.get("off_value", 0), "关机[重定位控制台]")
-    time.sleep(6)
+    time.sleep(4)
+    c_off = caps()                               # 断电期间: 本 rig 的板应已静默
+    time.sleep(2)
     act_power(rig_name, rig, p.get("on_value", 1), "开机[重定位控制台]")
     time.sleep(14)                               # 等它起到 shell 再探
+
     hit = None
     for _ in range(12):                          # 最多再等 ~36s
+        elapsed = time.time() - t0
         for ap in aps:
-            now = _probe_uptime(ap)
-            if now is not None and before.get(ap) is not None and now < before[ap]:
+            u0, u1 = before.get(ap), _probe_uptime(ap)
+            if u0 is None or u1 is None:
+                continue                         # 断电前就不活着 → 不能证明"被我重启"
+            if u0 < 5:
+                continue                         # 断电前 uptime≈0: 无从区分, 不认
+            if u1 < u0 + elapsed - 5:            # 远小于"没断电应有值" → 被重启过
                 hit = ap; break
         if hit:
             break
         time.sleep(3)
-    if not hit:                                  # 兜底: 账本灌入型(系统没起到 shell)
+    if not hit:                                  # (b) 灌入证据: 板子没起到 shell
+        c1 = caps()
         for ap in aps:
-            try:
-                n = _api(f"http://127.0.0.1:{ap}", "GET", "/api/info")["data"]["capture_bytes"]
-            except Exception as e:
-                print(f"[relocate] 读账本 @{ap} 失败: {e}", flush=True); continue
-            if cap0.get(ap) is not None and n - cap0[ap] > 5000:
+            if c0.get(ap) is None or c_off.get(ap) is None or c1.get(ap) is None:
+                continue
+            quiet = c_off[ap] - c0[ap] <= 200    # 断电期间基本没吐字(=真被断了电)
+            burst = c1[ap] - c_off[ap]           # 上电后才灌入
+            if quiet and burst > 5000:
                 hit = ap; break
     if not hit:
-        raise RigError(4, f"{rig_name}: 断电重启后没有串口的 uptime 归零, 无法重定位控制台"
-                          "(电源线是否还接在控制器上?)")
+        raise RigError(4, f"{rig_name}: 断电重启后没有观察到任何串口'被重启'的证据"
+                          "(uptime 归零 / 断电静默后灌入启动日志); "
+                          "可能: 电源线未接在该控制器上 / 板子未上电 / 串口线未接")
     tab = next((t for t in hub_tabs() if t["agent_port"] == hit), None)
     if not tab:
         raise RigError(4, "找到目标但 hub 里查不到该实例")
@@ -248,7 +267,7 @@ def relocate_console(rig_name, rig, rigs_path=None, all_rigs=None):
     rig["target"]["console_relocated_from"] = old
     if rigs_path and all_rigs is not None:
         save_rigs(rigs_path, all_rigs)
-    print(f"{rig_name}: ✔ 控制台重定位 {old} → {chain} (实例{hit}, uptime 归零实证)", flush=True)
+    print(f"{rig_name}: ✔ 控制台重定位 {old} → {chain} (实例{hit}, 已观察到重启证据)", flush=True)
     return hit, tab
 
 def send_and_read(agent_port, cmd, settle=SETTLE_S):
@@ -600,19 +619,22 @@ def usb_mode_for(rig):
     if dl:                                        # ② 登记口兜底(无序列号/序列号没上线时)
         dev = _rk_usb_by_chain().get(dl)
         if dev:
-            if adb_serial and dev["serial"] and dev["serial"] != adb_serial:
-                return None    # 口上有 2207 但序列号是别的板(挪线后旧口被占) —— 不许冒领
-            pid = dev["pid"]
-            extra = f", serial={dev['serial'][:12]}" if dev["serial"] else ""
-            return f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}{extra} @下载口{dl}"
+            if dev["serial"] and adb_serial and dev["serial"] != adb_serial:
+                return None    # 口上的 2207 是别的板(挪线后旧口被占) —— 不许冒领
+            if dev["serial"] and not adb_serial:
+                # 没登记序列号: 记下这个口的 serial 供人确认, 但**不认领**
+                return (f"?口{dl} 有 2207:{dev['pid']} serial={dev['serial'][:12]} —— "
+                        f"本 rig 未登记序列号, 无法确认归属; 跑 bind-dl 或在 rigs.json 填 "
+                        f"target.adb_serial 后才算数")
+            if not dev["serial"]:
+                return f"2207:{dev['pid']} → {USB_PID_MODE.get(dev['pid'], '未知PID')} @下载口{dl}(设备无序列号)"
         return None                               # 口上无 2207(线未插/USB口通道未供电)
+    # ③ 没有任何身份依据(未绑定下载口): **宁可报未见, 也不按类型(2207:350b)认领**。
+    #    旧逻辑"总线上找到任意 350b 就算本 rig"是 SSI_17 冒充与刷机会话撞号的根源。
     pids = re.findall(r"ID\s+2207:([0-9a-f]{4})", _lsusb(), re.I)
-    download = [p.lower() for p in pids if p.lower() in ("350b", "320b")]
-    if download:
-        pid = download[0]
-        return f"2207:{pid} → {USB_PID_MODE.get(pid)}"
     if pids:
-        return None   # 总线上有别的 2207 设备, 但都不是本板 → 视为未见
+        return (f"?未绑定下载口(总线有 {len(pids)} 个 2207 设备但不认领); "
+                f"先跑 bind-dl")
     return None
 
 

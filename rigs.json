@@ -37,8 +37,8 @@
       "download_pid_now": "0006",
       "download_bound_at": "2026-11-21 14:02",
       "download_bound_by": "同一轮线位互换实证: USB 与串口对调, 1.4.3 现为 A 板下载口",
-      "console_relocated_at": "2026-11-25 11:30",
-      "console_relocated_from": "1.4.4"
+      "console_relocated_at": "2026-11-25 11:43",
+      "console_relocated_from": "1.4.3"
     },
     "_history": [
       {
@@ -118,7 +118,9 @@
       "adb_serial": "45ef5567472a8f0c",
       "download_bound_at": "2026-11-18 16:54",
       "download_bound_by": "bind-dl 断电差分; 2026-11-21 14:01 adbq/lsusb 复核 SN=ba6abb3faca76ab6(旧记 45ef… 实为 A 板)",
-      "_note_20261124": "12V5 断电时 45ef gadget 不消失 → 此板电源线已被改接, rig-B 的 12V5 通道当前不控制它; console 线(1.2)亦断(板端写 console 主机侧收不到); 待重新接线后复验"
+      "_note_20261124": "12V5 断电时 45ef gadget 不消失 → 此板电源线已被改接, rig-B 的 12V5 通道当前不控制它; console 线(1.2)亦断(板端写 console 主机侧收不到); 待重新接线后复验",
+      "console_relocated_at": "2026-11-25 11:42",
+      "console_relocated_from": "1.2"
     },
     "verified": {
       "off": {
