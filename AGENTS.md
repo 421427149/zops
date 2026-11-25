@@ -45,7 +45,10 @@
 9. **USB 拓扑易变**：动线/开关 H503 USB 口通道都可能让整棵子树重排（实测 1.3.x→1.1.x）。
    症状是「板子不见了/Tab 变未识别」→ 先看 by-path 现状，串口身份 keeper 会自动重建，
    下载口绑定重跑一次 `bind-dl`。绑定是快照，不是永久事实。
-10. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
+10. **板子身份只认两类硬证据：SoC 序列号（下载口）和电力差分（串口口）**。物理口、
+    PID(2207:xxx)、主机名、声卡型号都**不是**身份——口会被挪、PID 两块板一样、主机名
+    都叫 TQ3588、两块板都有 8988 声卡。拿不到硬证据时一律报"未见/无法确认"，宁可不认。
+11. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
    （`logs/hub_audit.jsonl`，主人用 `hub_audit_view.py` 实时围观）；直连 832x =
    绕开审计，等同私读。
 
@@ -79,6 +82,8 @@ python3 check_code.py             # 语法 + 重复定义 + 拼接事故 + 内�
 python3 test_agent_http.py        # 20 项, 自包含不碰真设备(只删自己造的临时 logs 文件)
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
+python3 test_topology.py         # 拓扑鲁棒性回归(仿真,不碰真设备): 挪线/对调/拔板/换板/没电/
+                                 #   没shell/电源线改接/第三方板/Loader态 共18场景; 改rigctl/adbq必跑
 python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为/选中标签高亮回归
 python3 serial_keeper.py --status # keeper 管理视图(实例缺失会自动补, 无需手动起)
 ```
