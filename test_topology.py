@@ -46,13 +46,21 @@ class Board:
         self.serial = serial
         self.on = True
         self.boot_t = None                   # 由 World 设(虚拟时钟)
+        self.tx = 100_000                    # 已发到串口的累计字节(账本来源)
+        self._last_clk = None
         self.serial_port = None              # 串口线当前插的物理口
         self.dl_port = None                  # 下载线当前插的物理口
         self.broken = False                  # 系统坏了(无 shell)
 
     def uptime(self):
+        """板子对 `/proc/uptime` 的回答。没电 = 不应答(None), 不是 0。
+
+        之前没电返回 0 是**错误的建模**: 真机没电的板根本不会回显, 而"刚上电
+        的活板"才会答 0~几秒。两者都给 0 会让 relocate 无法区分"没电"和"刚上电"
+        (属性测试 300 轮抓出: 修了串台就误伤刚上电的板, 反之亦然)。
+        """
         if not self.on:
-            return 0
+            return None
         return int(self.clk.time() - self.boot_t)
 
 
@@ -89,6 +97,21 @@ class World:
             if on and not b.on:
                 b.boot_t = self.clk.time()    # 上电 = uptime 归零
             b.on = on
+        self.tick()
+
+    def tick(self):
+        """推进时间带来的串口输出: 活着的板 ~50B/s 缓慢吐字; 冷启动后 10s 内灌 ~30KB 启动日志。"""
+        now = self.clk.time()
+        for b in self.boards.values():
+            if b._last_clk is None:
+                b._last_clk = now
+            dt = now - b._last_clk
+            if b.on:
+                b.tx += int(dt * 50)
+                age = now - (b.boot_t or now)
+                if age < 10:                  # 启动日志洪流
+                    b.tx += int(dt * 3000)
+            b._last_clk = now
 
     # ---- hub 实例视图(keeper: 串口线上着就有实例)
     def tabs(self):
@@ -159,12 +182,16 @@ def install(world, tmpdir):
         m = re.search(r":(\d+)$", base)
         b = world.board_of_port(int(m.group(1))) if m else None
         if b is not None and path == "/api/info":
-            return {"ok": True, "data": {"capture_bytes": 100}}
+            world.tick()
+            return {"ok": True, "data": {"capture_bytes": b.tx}}
         return {"ok": True, "data": {}}
     R._api = fake_api
-    R._probe_uptime = lambda ap: (world.board_of_port(ap).uptime()
-                                  if world.board_of_port(ap) and not world.board_of_port(ap).broken
-                                  else None)
+    def _probe(ap):
+        b = world.board_of_port(ap)
+        if b is None or b.broken:          # 没接串口线 / 没shell → 不应答
+            return None
+        return b.uptime()                  # 没电 → None; 活着 → 秒数(刚上电≈0)
+    R._probe_uptime = _probe
 
     def act_power(rig_name, rig, value, label):
         world.power(rig_name, value == 1)
@@ -431,10 +458,12 @@ def t_board_replaced(w):
     # A 板被换成另一块(序列号不同), 插在同一个下载口 1.3
     w.boards["A"].serial = "0000newboard0001"
     ta = usb_text("rig-A")
-    # 正确行为: 绝不能把新板**认领**成旧 A 板(返回 None 或以 ? 开头的存疑提示)
-    assert ta is None or ta.startswith("?"), f"旧登记把新板当成了旧 A 板: {ta}"
-    # 旧 A 板的序列号没出现在结论里(它已经不在线了)
-    assert "ba27" not in (ta or ""), ta
+    # 正确行为: 绝不能把新板**认领**成旧 A 板。"不认领"有三种合法形态:
+    #   None(口上没设备) / "?…无法确认" / "✘…是别的板…不认领"
+    def claims(t):            # 被认领 = 返回了一条**肯定的模式结论**(不以 ? ✘ 开头)
+        return bool(t) and not t.startswith(("?", "✘"))
+    assert not claims(ta), f"旧登记把新板当成了旧 A 板: {ta!r}"
+    assert "Loader" not in (ta or "") and "运行态" not in ta, ta   # 没给出任何模式结论
 
 
 @case("板子进 Loader(adb 不列, PID=350b): 序列号仍在, 仍按序列号认主")
@@ -469,6 +498,146 @@ def t_one_unpowered(w):
     except SystemExit:
         pass
     assert console_of("rig-A") == "1.4.3", "操作 rig-B 不该动 rig-A 的登记"
+
+
+def _quiet_boot(w):
+    """让冷启动日志变少: 上电后只有缓慢的 50B/s, 灌不到 5KB。
+    对应真机: 安静内核 / quiet 启动 / console 没从 DDR 阶段开始输出。
+    这时证据B(账本灌入)不够用, 只能靠证据A(uptime 回落)。"""
+    orig_tick = w.tick
+    def tick():
+        now = w.clk.time()
+        for b in w.boards.values():
+            if b._last_clk is None:
+                b._last_clk = now
+            dt = now - b._last_clk
+            if b.on:
+                b.tx += int(dt * 50)           # 没有启动日志洪流
+            b._last_clk = now
+    w.tick = tick
+
+
+@case("冷启动日志很少(<5KB)的板: 账本证据不够, 必须靠 uptime 回落证据定位")
+def t_quiet_boot(w):
+    t_initial(w)
+    _quiet_boot(w)
+    w.boards["A"].serial_port = "1.4.4"
+    _rel(w, "rig-A")
+    got = console_of("rig-A")
+    assert got == "1.4.4", f"安静启动的板没能重定位: {got}"
+
+
+@case("登记口被别板占且本板不在线: 兜底的冒领校验必须拒绝")
+def t_fallback_impersonation(w):
+    _bind_all(w)
+    w.boards["A"].dl_port = None                  # A 的下载线拔了
+    w.boards["B"].dl_port = "1.3"                 # B 的线插到 A 的登记口 1.3
+    rigs = R.load_rigs(R.RIGS_DEFAULT)
+    rigs["rig-A"]["target"]["download_chain"] = "1.3"
+    rigs["rig-A"]["target"]["adb_serial"] = w.boards["A"].serial      # A 登记过序列号
+    R.save_rigs(R.RIGS_DEFAULT, rigs)
+    ta = usb_text("rig-A")
+    # 正确行为: 明确报"登记口上是别的板, 不认领"——既不能认领, 也不能静默 None(那是
+    # "口上没设备"的语义, 会让人以为线没插)
+    assert ta and ta.startswith("✘") and "别的板" in ta, f"rig-A 没有拒绝占口的别板: {ta!r}"
+    assert w.boards["B"].serial[:12] in ta and w.boards["A"].serial[:12] in ta, ta   # 两边序列号都报出来
+    assert "bind-dl" in ta, "没给出下一步指引"
+    tb = usb_text("rig-B")
+    assert w.boards["B"].serial[:12] in tb and not tb.startswith(("✘", "?")), tb
+
+
+@case("未绑定下载口的 rig: 总线上有别的 2207 设备也不认领, 且提示先 bind-dl")
+def t_unbound_hint(w):
+    t_initial(w)
+    w.boards["A"].dl_port = "1.3"; w.boards["B"].dl_port = "1.4.4"
+    rigs = R.load_rigs(R.RIGS_DEFAULT)
+    for n in ("rig-A", "rig-B"):
+        rigs[n]["target"].pop("download_chain", None)
+        rigs[n]["target"].pop("adb_serial", None)
+    R.save_rigs(R.RIGS_DEFAULT, rigs)
+    import subprocess as _sp
+    R._lsusb = lambda: "Bus 003 Device 5: ID 2207:350b Fuzhou Rockchip\nBus 003 Device 6: ID 2207:0006 Fuzhou Rockchip\n"
+    for n in ("rig-A", "rig-B"):
+        t = usb_text(n)
+        assert t is None or t.startswith("?"), f"{n} 认领了无主的 2207 设备: {t}"
+        assert t and "bind-dl" in t, f"{n} 未给出'先跑 bind-dl'的指引: {t!r}"
+
+
+@case("USB 枚举: 只收 VID=2207 的设备级条目, 跳过接口级, 读对 PID/序列号")
+def test_usb_vendor_filter(w):
+    import tempfile as _tf
+    fake = _tf.mkdtemp()
+    def mk(name, vid, pid, sn=None):
+        # 注意: 目录名**保留冒号** —— 真实 sysfs 的接口级条目就叫 `3-1.4:1.0`,
+        # 程序正是靠名字里的 ':' 识别并跳过它; 之前把冒号换成下划线是错的测试数据
+        d = os.path.join(fake, name)
+        os.makedirs(d)
+        open(os.path.join(d, "idVendor"), "w").write(vid + "\n")
+        open(os.path.join(d, "idProduct"), "w").write(pid + "\n")
+        if sn is not None:
+            open(os.path.join(d, "serial"), "w").write(sn + "\n")
+    mk("3-1.3", "2207", "350B", "aaaa1111")        # RK 板, Loader 态
+    mk("3-1.4", "1a86", "7523", "bbbb2222")        # CH340 串口线 —— 不是 RK, 不能收
+    mk("3-1.4:1.0", "2207", "0006", "cccc3333")    # 接口级条目(同名设备已收) —— 必须跳过
+    mk("3-1.5", "0483", "5740")                    # STM32 —— 不是 RK, 且没有 serial 文件
+    mk("usb1", "1d6b", "0002")                     # 根集线器, 名字里没有 '-'
+    R.SYSFS_USB = fake
+    # install() 已把 _rk_usb_by_chain 换成假世界版本; 这里要测**真实**枚举逻辑, 还原之
+    import types as _types
+    real_src = open(os.path.join(HERE, "rigctl.py"), encoding="utf-8").read()
+    ns = {"__name__": "rigctl_real", "__file__": os.path.join(HERE, "rigctl.py")}
+    exec(compile(real_src, ns["__file__"], "exec"), ns)     # 干净的 rigctl 副本
+    ns["SYSFS_USB"] = fake
+    out = ns["_rk_usb_by_chain"]()
+    assert set(out) == {"1.3"}, f"枚举结果不对(多了非RK/接口级, 或少了RK): {out}"
+    assert out["1.3"]["pid"] == "350b", out        # PID 归一成小写
+    assert out["1.3"]["serial"] == "aaaa1111", out
+    ns["SYSFS_USB"] = "/nonexistent/sysfs"           # sysfs 读不到 → 空字典, 不抛异常
+    assert ns["_rk_usb_by_chain"]() == {}
+
+
+@case("口匹配: 不同口/解析不出的一边绝不匹配(否则任何实例都能冒充任何登记)")
+def test_port_matches_strict(w):
+    P = "pci-0000:00:00.0-usb-0:"
+    # ① 两边都能解析出链路段: 必须相等
+    assert R.port_matches(P + "1.4.3:1.0-port0", "1.4.3") is True
+    assert R.port_matches(P + "1.4.3:1.0-port0", "1.4.4") is False, "不同链路段被当成同一个口"
+    assert R.port_matches(P + "1.4.3:1.0-port0", P + "1.4.4:1.0-port0") is False
+    assert R.port_matches("1.4.3", "1.4.3") is True
+    # ② 退到设备节点比较: 假装 by-path 目录(1.4.3 → ttyUSB7)
+    import os as _os
+    fake = _os.path.join(_os.sep, "tmp", "zops-bypath-fake")
+    _os.makedirs(fake, exist_ok=True)
+    link = _os.path.join(fake, "pci-0000:00:00.0-usb-0:1.4.3:1.0-port0")
+    try:
+        if _os.path.lexists(link):
+            _os.remove(link)
+        _os.symlink("../../ttyUSB7", link)
+    except OSError:
+        pass
+    real_listdir, real_realpath = _os.listdir, _os.path.realpath
+    real_bp = "/dev/serial/by-path"
+    import types as _t
+    # 临时把 serial_node 里的 by-path 根指到假目录: 用干净副本 + 改源码里的常量
+    src = open(_os.path.join(HERE, "rigctl.py"), encoding="utf-8").read()
+    src = src.replace('os.listdir("/dev/serial/by-path")', f'os.listdir({fake!r})')
+    src = src.replace('os.path.realpath(f"/dev/serial/by-path/{entry}")',
+                      f'os.path.realpath(f"{fake}/{{entry}}")')
+    ns = {"__name__": "rigctl_pm", "__file__": os.path.join(HERE, "rigctl.py")}
+    exec(compile(src, ns["__file__"], "exec"), ns)
+    pm, sn = ns["port_matches"], ns["serial_node"]
+    assert sn("1.4.3") == "ttyUSB7", sn("1.4.3")           # 前提: 假目录解析得出节点
+    assert sn("1.4.4") is None, sn("1.4.4")                # 假目录里没有 1.4.4
+    assert pm("/dev/ttyUSB7", "1.4.3") is True, "节点相同应匹配"
+    assert pm("/dev/ttyUSB9", "1.4.3") is False, "节点不同却匹配了"
+    # 关键: 一边解析不出(None) → 绝不能匹配(变异 and→or 会在这里露馅)
+    assert pm("/dev/ttyUSB7", "1.4.4") is False, "登记键解析不出节点, 却匹配了实例"
+    assert pm("", "1.4.3") is False
+    assert pm(None, "1.4.3") is False
+    try:
+        _os.remove(link); _os.rmdir(fake)
+    except OSError:
+        pass
 
 
 # ----------------------------------------------------------------- main

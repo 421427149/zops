@@ -179,33 +179,44 @@ def find_target_instance(rig_name, rig, rigs_path=None, all_rigs=None):
         raise RigError(3, f"{rig_name}: 登记控制台口 {key} 无实例, 且自动重定位失败({e})")
 
 
+_PROBE_SEQ = [0]
+
+
 def _probe_uptime(ap):
-    """问板子 uptime 秒数(应答 `__UP_<n>__`); 板子没 shell/超时返回 None。"""
+    """问板子 uptime 秒数; 板子没 shell/没电/超时返回 None。
+
+    细节(都是真机会踩的):
+      * 每次用**唯一标记** `__UP<seq>_<n>__`: 窗口里可能残留上一次的回显,
+        不带序号会读到陈旧值;
+      * 只在"本次发送之后"新增的账本里找(按 offset 读), 且窗口放大到 16KB:
+        板子正刷内核日志时 800 字节窗口会把回显冲出去 → 误判成不在线。
+    """
+    _PROBE_SEQ[0] += 1
+    seq = _PROBE_SEQ[0]
     try:
         base = _api(f"http://127.0.0.1:{ap}", "GET", "/api/info")["data"]["capture_bytes"]
         _api(f"http://127.0.0.1:{ap}", "POST", "/api/tabs/0/send",
-             {"text": "echo __UP_$(cut -d. -f1 /proc/uptime)__"})
+             {"text": f"echo __UP{seq}_$(cut -d. -f1 /proc/uptime)__"})
         time.sleep(1.6)
         d = _api(f"http://127.0.0.1:{ap}", "GET",
-                 f"/api/tabs/0/receive?offset={base}&max_bytes=800")["data"]
-        m = re.search(r"__UP_(\d+)__", d.get("text") or "")
+                 f"/api/tabs/0/receive?offset={base}&max_bytes=16384")["data"]
+        m = re.search(rf"__UP{seq}_(\d+)__[^_]", d.get("text") or "")
         return int(m.group(1)) if m else None
     except Exception as e:                      # 记下来, 不静默
         print(f"[relocate] uptime 探针 @{ap} 失败: {e}", flush=True)
         return None
 
-
 def relocate_console(rig_name, rig, rigs_path=None, all_rigs=None):
     """登记的控制台口失效时(线被挪走), 用**电力差分**把控制台重新找出来并回写。
 
-    只认**观察到的重启事件**, 两个判据都要满足因果:
-      (a) uptime 证据: 断电前能探到 uptime u0(板子当时活着), 上电后探到 u1,
-          且 u1 明显小于"没断过电应有的值"(u0 + 流逝时间) → 它被重启过;
-      (b) 灌入证据(板子没起到 shell, 探不到 uptime 时): 断电期间账本**静止**,
-          上电之后才灌入大量启动日志 → 它是刚上电的。
-    探不到 uptime(0/None)、断电期间仍在吐字的口一律**不算**——否则任何一块
-    没电/假死的板都可能被认领(2026-11-25 拓扑回归实测)。
-    找不到就明确失败, 绝不退而求其次指到别的板。
+    只认**观察到的重启事件**, 两类硬证据任一成立即可:
+      (a) uptime 回落: 断电前已跑了一阵(u0 足够大), 上电后远低于「没断电应有的值」;
+      (b) 断电静默→上电恢复: 断电期间该串口口几乎没吐字, 上电后才灌入输出。
+          不要求断电前是活的(板子卡死时正是最需要它)。
+    为什么要两个: 「刚上电的板」(u0≈0)被重启后 uptime 反而变大, 证据(a)对它
+    天然无效, 只能靠(b); 板子没起到 shell 时探不到 uptime, 也只能靠(b)。
+    没电/一直静默的口两类证据都不满足 → 不认领; 找不到就明确失败, 绝不退而
+    求其次指到别的板(2026-11-25 拓扑回归+属性测试实测)。
     """
     p = (rig.get("controller") or {}).get("power") or {}
 
@@ -233,26 +244,30 @@ def relocate_console(rig_name, rig, rigs_path=None, all_rigs=None):
     hit = None
     for _ in range(12):                          # 最多再等 ~36s
         elapsed = time.time() - t0
+        c_now = caps()
         for ap in aps:
+            # 证据 A(uptime 回落): 断电前已跑了一会儿(u0 足够大), 重启后远低于"没断电应有值"。
+            #   注意: 刚上电的板 u0≈0, 重启后 u1 反而 >u0 —— 对它这个证据天然无效,
+            #   必须靠证据 B。(2026-11-25 属性测试 300 轮抓出, 之前两次打补丁都错在这)
             u0, u1 = before.get(ap), _probe_uptime(ap)
-            if u0 is None or u1 is None:
-                continue                         # 断电前就不活着 → 不能证明"被我重启"
-            if u0 < 5:
-                continue                         # 断电前 uptime≈0: 无从区分, 不认
-            if u1 < u0 + elapsed - 5:            # 远小于"没断电应有值" → 被重启过
+            if u0 and u1 is not None and u1 < u0 + elapsed - 5 and u1 <= max(60, elapsed + 5):
+                hit = ap; break
+            # 证据 B(断电静默 → 上电后恢复输出): 与 uptime 数值无关。
+            #   断电期间该口几乎没吐字(quiet), 且**上电之后**才出现大量输出(burst)。
+            #   这本身就是因果证据: 没接板/板子没电的口, 不会因为这次上电凭空冒出
+            #   启动日志。不要求「断电前是活的」——板子卡死(没 shell、串口静默)时
+            #   正是最需要靠冷启动+重定位来救的时候。
+            #   burst 阈值取大(>5000): 冷启动日志是洪流级, 靠它区别于
+            #   「别的板恰好吐了几个字」。
+            if c0.get(ap) is None or c_off.get(ap) is None or c_now.get(ap) is None:
+                continue
+            quiet = c_off[ap] - c0[ap] <= 200            # 断电期间静默
+            burst = c_now[ap] - c_off[ap] > 5000         # 上电后才灌入
+            if quiet and burst:
                 hit = ap; break
         if hit:
             break
         time.sleep(3)
-    if not hit:                                  # (b) 灌入证据: 板子没起到 shell
-        c1 = caps()
-        for ap in aps:
-            if c0.get(ap) is None or c_off.get(ap) is None or c1.get(ap) is None:
-                continue
-            quiet = c_off[ap] - c0[ap] <= 200    # 断电期间基本没吐字(=真被断了电)
-            burst = c1[ap] - c_off[ap]           # 上电后才灌入
-            if quiet and burst > 5000:
-                hit = ap; break
     if not hit:
         raise RigError(4, f"{rig_name}: 断电重启后没有观察到任何串口'被重启'的证据"
                           "(uptime 归零 / 断电静默后灌入启动日志); "
@@ -568,6 +583,9 @@ def _adb_devices_l():
         return ""
 
 
+SYSFS_USB = "/sys/bus/usb/devices"        # USB 设备的 sysfs 根(测试可替换)
+
+
 def _rk_usb_by_chain():
     """枚举总线上全部 Rockchip(2207) 设备: {链路段: {"pid","serial"}}。
 
@@ -577,13 +595,13 @@ def _rk_usb_by_chain():
     """
     out = {}
     try:
-        names = os.listdir("/sys/bus/usb/devices")
+        names = os.listdir(SYSFS_USB)           # 测试可换成临时目录(假 sysfs)
     except OSError:
         return out
     for name in names:
         if "-" not in name or ":" in name:      # 跳过接口级条目(3-1.2:1.0)
             continue
-        base = f"/sys/bus/usb/devices/{name}"
+        base = f"{SYSFS_USB}/{name}"
         try:
             if open(f"{base}/idVendor").read().strip() != "2207":
                 continue
@@ -616,19 +634,27 @@ def usb_mode_for(rig):
                 moved = f"(口{dl}→{chain} 已自动追踪)" if dl and chain != dl else f"@口{chain}"
                 return (f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}"
                         f", serial={adb_serial[:12]} {moved}")
-    if dl:                                        # ② 登记口兜底(无序列号/序列号没上线时)
+    if dl:
+        # ② 登记口兜底。走到这里说明"按序列号在总线上没找到本板"。登记口上若有设备,
+        #    按它与本 rig 登记身份的关系分**互斥的三种**情况处理(正向写法, 每个分支
+        #    行为唯一确定——之前的排除法写法里"别板设备"与兜底同样返回 None, 属等价
+        #    变异, 变异测试无法证明该判断有效):
         dev = _rk_usb_by_chain().get(dl)
-        if dev:
-            if dev["serial"] and adb_serial and dev["serial"] != adb_serial:
-                return None    # 口上的 2207 是别的板(挪线后旧口被占) —— 不许冒领
-            if dev["serial"] and not adb_serial:
-                # 没登记序列号: 记下这个口的 serial 供人确认, 但**不认领**
-                return (f"?口{dl} 有 2207:{dev['pid']} serial={dev['serial'][:12]} —— "
-                        f"本 rig 未登记序列号, 无法确认归属; 跑 bind-dl 或在 rigs.json 填 "
-                        f"target.adb_serial 后才算数")
-            if not dev["serial"]:
-                return f"2207:{dev['pid']} → {USB_PID_MODE.get(dev['pid'], '未知PID')} @下载口{dl}(设备无序列号)"
-        return None                               # 口上无 2207(线未插/USB口通道未供电)
+        if not dev:
+            return None                           # 口上无 2207(线未插/USB口通道未供电)
+        if dev["serial"] and adb_serial and dev["serial"] != adb_serial:
+            # 口上是一块**别的板**(挪线后旧口被占; 本板在 Loader 态时 adb 序列号比对
+            # 仍有效)。明确报"被占", 不认领 —— 这是防刷机撞号的最后一道闸。
+            return (f"✘登记下载口 {dl} 上是别的板(serial={dev['serial'][:12]}, "
+                    f"本 rig 登记 {adb_serial[:12]}), 不认领; 本板可能离线或被挪线, "
+                    f"跑 bind-dl 重绑")
+        if not adb_serial:
+            # 本 rig 没登记序列号: 口上有带序列号的设备, 但无从确认是不是本板 → 不认领
+            return (f"?口{dl} 有 2207:{dev['pid']} serial={dev['serial'][:12]} —— "
+                    f"本 rig 未登记序列号, 无法确认归属; 跑 bind-dl 或在 rigs.json 填 "
+                    f"target.adb_serial 后才算数")
+        return (f"2207:{dev['pid']} → {USB_PID_MODE.get(dev['pid'], '未知PID')} "
+                f"@下载口{dl}(设备无序列号, 按登记口认定)")
     # ③ 没有任何身份依据(未绑定下载口): **宁可报未见, 也不按类型(2207:350b)认领**。
     #    旧逻辑"总线上找到任意 350b 就算本 rig"是 SSI_17 冒充与刷机会话撞号的根源。
     pids = re.findall(r"ID\s+2207:([0-9a-f]{4})", _lsusb(), re.I)

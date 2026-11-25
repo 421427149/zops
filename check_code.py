@@ -26,7 +26,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FILES = ["agent_hub.py", "rigctl.py", "serial_keeper.py", "serial_debug.py",
                  "agent_http.py", "adbq.py", "mcp_bridge.py", "hub_audit_view.py",
-                 "start_zops.sh", "test_topology.py"]
+                 "start_zops.sh", "test_topology.py", "test_property.py", "test_mutation.py"]
 
 
 def check_syntax(path):

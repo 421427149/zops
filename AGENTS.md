@@ -82,8 +82,13 @@ python3 check_code.py             # 语法 + 重复定义 + 拼接事故 + 内�
 python3 test_agent_http.py        # 20 项, 自包含不碰真设备(只删自己造的临时 logs 文件)
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
-python3 test_topology.py         # 拓扑鲁棒性回归(仿真,不碰真设备): 挪线/对调/拔板/换板/没电/
-                                 #   没shell/电源线改接/第三方板/Loader态 共18场景; 改rigctl/adbq必跑
+python3 test_topology.py         # 拓扑鲁棒性回归(仿真, 不碰真设备, ~40s): 挪线/对调/拔板/换板/
+                                 #   没电/没shell/电源线改接/第三方板/Loader态/安静启动 共23场景
+python3 test_property.py 300     # 属性测试(仿真, ~40s): 随机生成接线世界, 验证5条恒成立性质
+                                 #   (不串台/按序列号追踪/离线不认领); 失败会打印最小复现步骤
+python3 test_mutation.py         # 变异测试(~10分钟, 提交 rigctl/adbq 的改动前跑): 把核心判断
+                                 #   改坏22处看测试能否抓到; 非等价变异必须全杀, 否则说明
+                                 #   "测试全过但没测到" —— 新增/修改核心逻辑时同步加变异点
 python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为/选中标签高亮回归
 python3 serial_keeper.py --status # keeper 管理视图(实例缺失会自动补, 无需手动起)
 ```
