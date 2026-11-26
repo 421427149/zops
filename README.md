@@ -424,6 +424,26 @@ create_tab`；**旧名 `qserial_*` 仍作别名照收**（在线会话不必重�
 > 指向 **8300（网关）** 即可看到所有板子；指向单个实例端口（如 8321）只看那一块。
 > 改 MCP 配置后需重启会话才生效。
 
+### 一条命令入口 `zops`（zops_cli.py）
+
+MCP 之外的轻量入口：AI（或人）**一次调用**完成「查 Tab → 发命令 → 长轮询等特征 → 取应答」，
+`AGENTS.md` 的铁律内建在流程里——只按板名寻址、ttyUSBx/COMx 直接拒绝、发完即长轮询
+（不 sleep 死等）、控电只放行幂等安全的 `on`。只依赖标准库，串口读写一律经网关 hub
+（默认 `http://127.0.0.1:8300`，`--hub`/`ZOPS_HUB`、`--token`/`ZOPS_TOKEN` 可覆盖）。
+
+```bash
+python3 zops_cli.py run --board "3588 A" --send "uname -a" --expect "Linux" --timeout 10 --json
+python3 zops_cli.py boards --json          # 板子清单：title/hint/来源/tab/rig/flash.state
+python3 zops_cli.py rig rig-A on --json    # 只放行 on；off/coldboot 等一律拒绝（真实断电须人来）
+```
+
+- 退出码：`0` 等到了；`1` 超时未等到；`2` 环境或用法错误（网关不通/板名不认识/端口名被拒/参数错）。
+- `--json` 输出一行 JSON（`ok/board/tab/matched/output/elapsed_ms/reason/capture_consistent`）；
+  错误原因在 `reason`（`timeout/no_such_board/port_name_rejected/hub_unreachable/...`），
+  板名不对时 stderr 列出当前可用板名。
+- 默认跳过所发命令的回显行再匹配，`--count-echo` 关闭；`capture_consistent=false` 原样带出不吞。
+- 给 AI 的自动发现技能见 `skills/zops/SKILL.md`（`deploy/install_skill.py` 装到本机技能目录）。
+
 ### AI 活动审计与围观
 
 网关对每个 AI 读写落一行审计（`logs/hub_audit.jsonl`：时间/板名/动作/字节数/发送内容/接收尾部

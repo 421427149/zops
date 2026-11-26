@@ -4,7 +4,7 @@
 newline-delimited JSON-RPC 2.0 通信；本脚本不直接操作串口，串口能力全部经
 HTTP API 访问。用法示例：
 
-    python src/main/mcp_bridge.py --port 8321 --token <令牌>
+    python mcp_bridge.py --port 8321 --token <令牌>
 """
 
 import argparse
