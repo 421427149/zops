@@ -15,9 +15,10 @@
     "download_chain": "1.4.4",
     "adb_serial": "45ef5567472a8f0c"
   },
-  "pci-0000:0c:00.3-usb-0:1.4.3:1.0-port0": {
+  "pci-0000:0c:00.3-usb-0:1.4.4:1.0-port0": {
     "name": "3588 A",
-    "note": "rig-A 受控板控制台(T536 治具供电); 2026-11-25 uptime归零差分实证; 曾短暂在1.4.4",
-    "adb_serial": "ba27980e967d3a93"
+    "adb_serial": "a9b52a7d6c07dccf",
+    "download_chain": "1.4.3",
+    "note": "rig 控制台口; 2026-11-27 15:25 标记法实证(serial a9b52a7d6c07), 由 1.4.3 挪来"
   }
 }
