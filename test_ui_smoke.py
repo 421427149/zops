@@ -197,6 +197,41 @@ console.log(JSON.stringify([a,b,c]));
     return True, "首屏+切 Tab 高亮正确, 无变化不重建"
 
 
+def check_unregistered_text(js):
+    """面板「未登记设备」行的文本函数 unregisteredText: 用真函数跑, 三种模式/无序列号/错误项/空表。"""
+    s = js.find("function unregisteredText(")
+    e = js.find("async function pollRigs(", s)
+    if s < 0 or e < 0:
+        return False, "找不到 unregisteredText / pollRigs 锚点"
+    probe = js[s:e].strip() + """
+console.log(JSON.stringify([
+ unregisteredText([{serial:'a9b52a7d6c07dccf',mode:'system',download_chain:'1.4.3'}]),
+ unregisteredText([{serial:'x',mode:'loader',download_chain:'1.3'},{serial:'y',mode:'maskrom',download_chain:'1.1'}]),
+ unregisteredText([{serial:null,mode:'system',download_chain:'1.2'}]),
+ unregisteredText([{error:'在线检测失败: boom'}]),
+ unregisteredText([]), unregisteredText(undefined)]));
+"""
+    open("/tmp/ui_unreg.js", "w", encoding="utf-8").write(probe)
+    try:
+        r = subprocess.run(["node", "/tmp/ui_unreg.js"], capture_output=True, text=True, timeout=20)
+    except FileNotFoundError:
+        return True, "(无 node, 跳过行为抽查)"
+    except subprocess.TimeoutExpired:
+        return False, "node 超时"
+    if r.returncode != 0:
+        return False, f"node 执行失败: {r.stderr.strip()[:200]}"
+    try:
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False, f"输出无法解析: {r.stdout[:200]!r}"
+    want = ["serial=a9b52a7d6c07dccf @口1.4.3 (运行态)",
+            "serial=x @口1.3 (Loader)  serial=y @口1.1 (MaskROM)",
+            "serial=无 @口1.2 (运行态)", "在线检测失败: boom", "", ""]
+    if out != want:
+        return False, f"未登记设备行文本不对: {out}"
+    return True, "未登记设备行: 运行态/Loader/MaskROM/无序列号/错误项/空表 全部正确"
+
+
 def main():
     base = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8300").rstrip("/")
     try:
@@ -215,6 +250,7 @@ def main():
     checks.append(("翻译器行为", *check_key_functions(html)))
     checks.append(("smartPaste 实跑(真函数+桩)", *check_smartpaste_real(html)))
     checks.append(("选中标签高亮", *check_tab_highlight(js)))
+    checks.append(("未登记设备行文本", *check_unregistered_text(js)))
     checks.append(("静态外链脚本", True,
                    ", ".join(re.findall(r'src="(/static/[^"]+)"', html)) or "无"))
 

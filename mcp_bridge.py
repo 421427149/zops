@@ -30,6 +30,16 @@ TOOL_DEFINITIONS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "zops_rigs",
+        "description": (
+            "在线检测(只读, 不动板子, 每次调用现扫 USB 总线): 现在哪些开发板在线、各是哪个台架(rig)"
+            "的板、烧录目标序列号。按 SoC 序列号认板。返回 rigs(每个台架的 控制器/受控串口 target"
+            "/USB/flash/verified) 与 unregistered(在线但不属于任何台架的设备——换过板或登记没跟上,"
+            "认它要跑 rigctl <台架名> bind-dl)。操作任何板子之前先调它; flash.state=offline 表示"
+            "该板下载线没接或没电, 不要烧。"),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "zops_list_ports",
         "description": "列出本机当前可用的串口。",
         "inputSchema": {"type": "object", "properties": {}},
@@ -158,6 +168,8 @@ class McpBridge:
         try:
             if name == "zops_status":
                 data = self._request("GET", "/api/status")
+            elif name == "zops_rigs":
+                data = self._request("GET", "/api/rigs?fresh=1")   # fresh=1: 不吃缓存, 现扫
             elif name == "zops_list_ports":
                 data = self._request("GET", "/api/ports")
             elif name == "zops_list_tabs":

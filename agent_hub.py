@@ -35,6 +35,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -46,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "3.12"
+HUB_VERSION = "3.13"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -68,6 +69,14 @@ _HINT_PATTERNS = (
 # 探测/转发要捕获的网络异常: URLError(含 HTTPError 超类)/OSError(含 socket 超时)/
 # HTTPException(端口上蹲着非 HTTP 服务时 BadStatusLine 等, 它不是 OSError 子类)
 _NET_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
+
+
+# udevadm monitor 的事件行形如:
+#   UDEV  [1894355.366344] change   /devices/…/usb3/3-1/3-1.4/3-1.4.3 (usb)
+# 接口级条目的设备名带冒号(…/3-1.4.3:1.0), 不必理会。注意: --udev 模式下 udevadm(v252)
+# **不打印 E: 属性行**, 不能靠 "DEVTYPE=usb_device" 去筛——那样一条都匹配不上, 热插拔
+# 触发会静默失效(2026-11-27 用 adb reboot 实测踩到)。
+_UDEV_USB_DEV = re.compile(r"^UDEV\s+\[[^\]]*\]\s+\S+\s+\S*/([^/:]+)\s+\(usb\)\s*$")
 
 
 class AgentApiError(Exception):
@@ -541,6 +550,97 @@ class Hub:
             out.append(entry)
         return out
 
+    def rescan(self):
+        """丢弃全部探测缓存: 下一次 /api/rigs 立即重扫(按需现算 / 热插拔之后调用)。"""
+        self._usb_cache.clear()
+        self._h503_cache.clear()
+        self._disc_cache = None
+
+    def unregistered(self):
+        """在线但不属于任何台架的 RK 设备: 换过板 / 新板接入而登记没跟上时的信号。"""
+        R = self._rig_mod()
+        try:
+            return R.online_report(rigs=R.load_rigs(self._rigs_path()),
+                                   tabs=self.list_tabs()["tabs"])["unregistered"]
+        except Exception as e:
+            return [{"error": f"在线检测失败: {e}"}]
+
+    # ---- 热插拔触发 ----
+
+    def start_hotplug_watch(self):
+        threading.Thread(target=self._hotplug_loop, daemon=True).start()
+
+    def _rk_set(self):
+        try:
+            return self._rig_mod()._rk_usb_by_chain()
+        except Exception as e:
+            print(f"[hub] 热插拔: 扫总线失败: {e}", flush=True)
+            return {}
+
+    @staticmethod
+    def _fmt_devs(devs):
+        return ", ".join(f"{(d.get('serial') or '无序列号')[:12]}@{c}({d.get('pid')})"
+                         for c, d in sorted(devs.items()))
+
+    def _on_rk_change(self, old, new):
+        """RK 设备集合变了: 现算一次在线检测 → 写审计 + 清缓存(面板下一轮轮询即见)。"""
+        up = {c: d for c, d in new.items() if old.get(c) != d}
+        down = {c: d for c, d in old.items() if new.get(c) != d}
+        try:
+            R = self._rig_mod()
+            summary = R.online_report(rigs=R.load_rigs(self._rigs_path()), bus=new,
+                                      tabs=self.list_tabs()["tabs"])["summary"]
+        except Exception as e:
+            summary = f"(在线检测失败: {e})"
+        rec = {"t": time.strftime("%H:%M:%S"), "board": "热插拔", "dev": "usb",
+               "action": f"{summary} | 上线: {self._fmt_devs(up) or '无'}; "
+                         f"下线: {self._fmt_devs(down) or '无'}",
+               "status": 0, "src": "udev"}
+        self.rescan()
+        self._write_audit(rec)
+        print(f"[hub] 热插拔 {rec['t']}: {rec['action']}", flush=True)
+
+    def _hotplug_loop(self):
+        """热插拔触发: 盯 udev 的 USB 事件(事件驱动, 不是轮询)。
+
+        `udevadm monitor` 普通用户即可订阅, 不需要 root, 也不用装 udev 规则。udev 在
+        枚举过程中一条设备会来好几个事件, 所以只在 **RK 设备集合真的变了** 时才动作。
+        monitor 意外退出 3 秒后重拉。
+        """
+        last = self._rk_set()
+        while True:
+            try:
+                proc = subprocess.Popen(
+                    ["udevadm", "monitor", "--udev", "--subsystem-match=usb"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                for line in proc.stdout:
+                    if not _UDEV_USB_DEV.match(line):   # 只认 usb 子系统的设备级事件行
+                        continue
+                    cur = self._rk_set()
+                    if cur != last:
+                        self._on_rk_change(last, cur)
+                        last = cur
+                proc.wait(timeout=5)
+            except Exception as e:
+                print(f"[hub] 热插拔监听异常, 3s 后重拉: {e}", flush=True)
+            time.sleep(3)
+
+    def _write_audit(self, rec):
+        """追加一条审计(JSONL, 8MB 轮转); 失败打到 hub 日志, 不抛。"""
+        if not self.audit_path:
+            return
+        try:
+            with self._audit_lock:
+                try:
+                    if os.path.getsize(self.audit_path) > 8 * 1024 * 1024:
+                        os.replace(self.audit_path, self.audit_path + ".1")
+                except OSError:
+                    pass
+                with open(self.audit_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"[hub] 审计写入失败: {e}", flush=True)
+
     def rigs_action(self, name, action, src="agent"):
         """网页电源动作: 后台线程执行 rigctl 动作, 输出存 _rig_out 供状态条回显。"""
         R = self._rig_mod()
@@ -755,7 +855,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._route_tabs(hub, method, seg, query)
         if seg[1] == "rigs" and len(seg) == 2:
             self._need(method, "GET")
-            return 200, False, {"rigs": hub.rigs_status()}
+            if parse_qs(query).get("fresh"):        # 按需现算: 丢缓存立即重扫
+                hub.rescan()
+            return 200, False, {"rigs": hub.rigs_status(), "unregistered": hub.unregistered()}
+        if seg[1] == "rigs" and len(seg) == 3 and seg[2] == "rescan":
+            self._need(method, "POST")
+            hub.rescan()
+            return 200, False, {"rescanned": True}
         if seg[1] == "rigs" and len(seg) == 4:
             self._need(method, "POST")
             return 200, False, hub.rigs_action(
@@ -1154,8 +1260,10 @@ function tl(cmd){cmd=cmd||"";
  return res}
 
 let _rigsSig='';
+function unregisteredText(items){const L={system:'运行态',loader:'Loader',maskrom:'MaskROM'};
+ return (items||[]).map(u=>u.error?u.error:'serial='+(u.serial||'无')+' @口'+u.download_chain+' ('+(L[u.mode]||u.mode)+')').join('  ')}
 async function pollRigs(){try{const d=await jget('/api/rigs');
- const sig=JSON.stringify(d.rigs);if(sig===_rigsSig)return;_rigsSig=sig;
+ const sig=JSON.stringify([d.rigs,d.unregistered||[]]);if(sig===_rigsSig)return;_rigsSig=sig;
  const box=$('rigs');box.textContent='';
  for(const r of d.rigs){
   const row=document.createElement('div');row.className='rig';
@@ -1197,7 +1305,12 @@ async function pollRigs(){try{const d=await jget('/api/rigs');
   row.appendChild(acts);
   if(r.last){const l=document.createElement('span');l.className='last';l.textContent='↳ '+r.last;
    row.appendChild(l)}
-  box.appendChild(row)}}catch(e){$('rigs').textContent='rig 状态获取失败: '+e.message}}
+  box.appendChild(row)}
+  if((d.unregistered||[]).length){const row=document.createElement('div');row.className='rig';
+   const nm=document.createElement('b');nm.textContent='未登记设备';row.appendChild(nm);
+   const s=document.createElement('span');s.className='chip warn';s.textContent=unregisteredText(d.unregistered);
+   s.title='在线但不属于任何台架(换过板/新板接入而登记没跟上): 认它跑 rigctl <组合名> bind-dl';row.appendChild(s);
+   box.appendChild(row)}}catch(e){$('rigs').textContent='rig 状态获取失败: '+e.message}}
 
 function openPasteBox(){                        // 保底粘贴入口: 真 textarea, 任何浏览器都能 Ctrl+V 进去
  const b=$('pbox');b.style.display='block';b.value='';b.focus();
@@ -1288,6 +1401,10 @@ def main():
     server = ThreadingHTTPServer((args.host, args.listen), _Handler)
     server.hub = hub
     server.daemon_threads = True
+    if shutil.which("udevadm"):
+        hub.start_hotplug_watch()       # 热插拔事件触发(事件驱动, 普通用户即可)
+    else:
+        print("[hub] 未找到 udevadm, 热插拔触发未启用(改用 /api/rigs?fresh=1 按需现算)", flush=True)
     if args.tls_cert:
         import ssl
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

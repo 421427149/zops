@@ -62,6 +62,14 @@ MUTS = [
      '        return any(d["pid"].lower() == pid.lower() or d["serial"] == sn', "Loader判定 and→or(别人的板也算)"),
     ("rigctl.py", 'return any(d["pid"].lower() == pid.lower() and d["serial"] == sn',
      '        return any(d["pid"].lower() == pid.lower() and (d["serial"] == sn or True)', "Loader判定丢掉序列号(按类型认领)"),
+    # ---- 在线检测 / 标记法绑定控制台 ----
+    ("rigctl.py", 'if sn in owner:', '        if sn not in owner:', "在线检测: 登记序列号匹配反转(自己的板进未登记)"),
+    ("rigctl.py", '"online": hit is not None,', '            "online": hit is None,', "在线检测: 在线/离线取反"),
+    ("rigctl.py", 'return "loader" if pid in RK_LOADER_PIDS else "system"',
+     '    return "system" if pid in RK_LOADER_PIDS else "loader"', "PID 判型 Loader↔运行态反转"),
+    ("rigctl.py", 'if marker in (d.get("text") or ""):', '        if marker not in (d.get("text") or ""):', "标记法: 命中判定取反"),
+    ("rigctl.py", 'if len(hits) != 1:                           # 标记法',
+     '    if len(hits) == 1:                           # 标记法', "标记法: 命中数校验反转"),
     # ---- 其它核心 ----
     ("rigctl.py", 'return bool(np and nk and np == nk)', '    return bool(np or nk or np == nk)', "口匹配 and→or(任何实例冒充任何登记)"),
     ("rigctl.py", 'read().strip() != "2207":',

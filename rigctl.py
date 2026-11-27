@@ -7,6 +7,7 @@
 还会认错对象。本工具把 rigs.json 登记的组合做成一等公民, 一条命令机械执行:
 
     rigctl status              # 所有组合: 控制台/受控串口/USB 判活 一行一结论
+    rigctl online              # 在线检测(只读): 现在哪些板在线、各是哪个 rig; --json 给机器用
     rigctl rig-A status        # 单个组合同上
     rigctl rig-A on            # 开机(4 路 GPIO 全写 1, 幂等)
     rigctl rig-A off           # 关机(全写 0)
@@ -18,6 +19,7 @@
                                #   (内核已panic时唯一入口; 加 --menu 停在菜单不选)
     rigctl rig-A relocate      # 控制台口被挪走后重新定位(电力差分, 会重启板子)并回写
     rigctl rig-A bind-dl       # 绑定USB下载口(断电差分), 会开USB口通道并重启板子
+    rigctl rig-A bind-console [--write]  # 不断电: 经 adb 让板子往 console 打标记, 核对/回写控制台口
     rigctl rig-A bind          # 重探测受控板: 关电盯哪个串口灭→开电盯哪个醒,
                                # 结论自动写回 rigs.json 的 target(换板/挪线后跑这个)
     rigctl --selftest          # 链路归一化自检, 不碰设备
@@ -45,6 +47,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RIGS_DEFAULT = os.path.join(HERE, "rigs.json")
+BOARDS_DEFAULT = os.path.join(HERE, "boards.json")   # 板名表(测试换成临时副本, 不碰真表)
 HUB_DEFAULT = os.environ.get("RIGCTL_HUB", "http://127.0.0.1:8300")
 READ_TAIL_BYTES = 4096          # 回读尾窗大小(足够覆盖命令回显)
 SETTLE_S = 0.8                  # 发命令后等回显落账的时间
@@ -919,7 +922,7 @@ def act_bind_download(rig_name, rig, rigs_path, all_rigs):
     tgt["download_bound_by"] = "bind-dl 断电差分"
     save_rigs(rigs_path, all_rigs)
     try:
-        bp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boards.json")
+        bp = BOARDS_DEFAULT
         b = json.load(open(bp, encoding="utf-8"))
         ck = tgt.get("console")
         for k, v in b.items():
@@ -1145,6 +1148,185 @@ def act_bind(rig_name, rig, rigs_path, all_rigs):
 
 # ---------------------------------------------------------------- 入口
 
+# ---------------------------------------------------------------- 在线检测
+
+RK_LOADER_PIDS = ("350b", "350e")       # 3588 系 Loader=350b, 3576=350e; MaskROM=320b
+_MODE_LABEL = {"system": "运行态", "loader": "Loader", "maskrom": "MaskROM"}
+
+
+def _rk_mode(pid):
+    """RK 设备 PID → 运行态(system) / Loader / MaskROM。"""
+    pid = (pid or "").lower()
+    if pid == "320b":
+        return "maskrom"
+    return "loader" if pid in RK_LOADER_PIDS else "system"
+
+
+def online_report(rigs=None, bus=None, tabs=None):
+    """在线检测(只读、不动板子): 现在哪些开发板在线、各是哪个 rig 的板。
+
+    判据 = 下载口上的 SoC 序列号(烧在 SoC 里, 线挪到哪都认得):
+      * 总线上的序列号 = 某 rig 登记的 target.adb_serial → 该 rig 的板在线;
+      * 不属于任何 rig → 未登记设备(只能报在线, 叫不出是哪块——认它要靠 bind-dl 的电力差分);
+      * rig 登记的序列号不在总线上 → 离线(下载线没接 / 板子没电 / 换过板而登记没跟上)。
+    控制台一侧只陈述事实(登记口上有没有实例), 不做任何探测。
+    rigctl online / hub /api/rigs / MCP zops_rigs / SessionStart hook / 热插拔 都走这一个函数。
+    """
+    rigs = rigs if rigs is not None else load_rigs(RIGS_DEFAULT)
+    bus = _rk_usb_by_chain() if bus is None else bus
+    tabs = hub_tabs() if tabs is None else tabs
+    owner = {(r.get("target") or {}).get("adb_serial"): n for n, r in rigs.items()
+             if (r.get("target") or {}).get("adb_serial")}
+    found, unregistered = {}, []
+    for chain, dev in sorted(bus.items()):
+        sn = dev.get("serial") or ""
+        item = {"serial": sn or None, "mode": _rk_mode(dev.get("pid")), "download_chain": chain}
+        if sn in owner:
+            found[owner[sn]] = item
+        else:
+            unregistered.append(item)
+    boards = []
+    for name, rig in rigs.items():
+        tgt = rig.get("target") or {}
+        hit = found.get(name)
+        con = tgt.get("console")
+        tab = next((t for t in tabs if con and port_matches(t.get("port"), con)), None)
+        boards.append({
+            "rig": name, "name": tgt.get("name"),
+            "online": hit is not None,
+            "mode": hit["mode"] if hit else None,
+            "serial": tgt.get("adb_serial"),
+            "download_chain": hit["download_chain"] if hit else None,   # 离线=没观测到, 不拿登记值冒充
+            "console": con, "console_instance": tab["agent_port"] if tab else None,
+        })
+    on = [b for b in boards if b["online"]]
+    off = [b["rig"] for b in boards if not b["online"]]
+    parts = []
+    if on:
+        parts.append("在线 " + "、".join(
+            f"{b['rig']} {b['name']}({_MODE_LABEL[b['mode']]})" for b in on))
+    if off:
+        parts.append("离线 " + "、".join(off))
+    parts.append(f"未登记设备 {len(unregistered)} 个")
+    return {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "boards": boards,
+            "unregistered": unregistered, "summary": "; ".join(parts)}
+
+
+def print_online(rep):
+    print(f"ZOps 在线检测 {rep['at']}")
+    print(f"  {rep['summary']}")
+    for b in rep["boards"]:
+        state = _MODE_LABEL[b["mode"]] if b["online"] else "离线"
+        con = f"控制台={b['console']}" + (f"(实例{b['console_instance']})" if b["console_instance"] else "(无实例)")
+        dl = f"下载口={b['download_chain']}" if b["download_chain"] else "下载口=未登记"
+        print(f"  {b['rig']:<8} {str(b['name']):<10} {state:<6} serial={str(b['serial'])[:12]}  {dl}  {con}")
+    for u in rep["unregistered"]:
+        extra = f" serial={u['serial'][:12]}" if u["serial"] else " (设备无序列号)"
+        print(f"  未登记  {'—':<10} {_MODE_LABEL[u['mode']]:<6} 下载口={u['download_chain']}{extra}"
+              "  ← 不属于任何 rig; 认它: rigctl <组合名> bind-dl")
+
+
+# ---------------------------------------------------------------- 标记法绑定控制台
+
+def find_console_by_nonce(rig):
+    """不断电, 找出本 rig 受控板的串口控制台在哪个口(板子须在运行态且 adb 可用)。
+
+    做法: 经下载口 adb 让板子往 /dev/console 打一个唯一标记, 看哪个串口实例收到它。
+    标记只可能从这块板的 console 出来, 所以是硬证据; 代价只是板子 console 上多一行
+    无害的 __ZOPSC_…__。relocate(电力差分)要断电重启板子, 能用这个就别用它。
+    返回 (收到标记的 tab 列表, 标记)。
+    """
+    tgt = rig.get("target") or {}
+    sn = tgt.get("adb_serial")
+    if not sn or not any(d.get("serial") == sn for d in _rk_usb_by_chain().values()):
+        raise RigError(3, f"登记的板(serial={str(sn)[:12]})不在线, 无法用标记法定位控制台")
+    tabs = hub_tabs()
+    base = {}
+    for t in tabs:
+        try:
+            base[t["agent_port"]] = _api(f"http://127.0.0.1:{t['agent_port']}", "GET",
+                                         "/api/info")["data"]["capture_bytes"]
+        except Exception as e:
+            print(f"[bind-console] 读账本 @{t['agent_port']} 失败: {e}", flush=True)
+    marker = f"__ZOPSC_{os.getpid() % 100000}_{int(time.time()) % 100000}__"
+    r = subprocess.run(["adb", "-s", sn, "shell", f"echo {marker} > /dev/console"],
+                       capture_output=True, text=True, timeout=20)
+    err = (r.stdout + r.stderr).strip()
+    if r.returncode != 0 or "error" in err.lower() or "not found" in err.lower():
+        raise RigError(3, f"adb -s {sn[:12]} 写标记失败: {err[:140] or '退出码 %d' % r.returncode}")
+    time.sleep(1.5)
+    hits = []
+    for t in tabs:
+        b0 = base.get(t["agent_port"])
+        if b0 is None:
+            continue
+        try:
+            d = _api(f"http://127.0.0.1:{t['agent_port']}", "GET",
+                     f"/api/tabs/0/receive?offset={b0}&max_bytes=8000")["data"]
+        except Exception as e:
+            print(f"[bind-console] 读回 @{t['agent_port']} 失败: {e}", flush=True)
+            continue
+        if marker in (d.get("text") or ""):
+            hits.append(t)
+    return hits, marker
+
+
+def act_bind_console(rig_name, rig, rigs_path=None, all_rigs=None, write=False):
+    """用标记法核对本 rig 的控制台口; write=True 时把结果回写 rigs.json / boards.json。"""
+    hits, marker = find_console_by_nonce(rig)
+    tgt = rig.setdefault("target", {})
+    old = tgt.get("console")
+    if len(hits) != 1:                           # 标记法: 必须恰好命中一个串口实例
+        raise RigError(4, f"{rig_name}: 标记 {marker} 命中 {len(hits)} 个串口实例(应为 1)。"
+                          "0 个 = 控制台线没接/该口没起实例/收方向不通, 不是标记法能解决的")
+    tab = hits[0]
+    chain = hub_chain(tab["port"]) or tab["port"]
+    same = old == chain
+    print(f"{rig_name}: 标记 {marker} 只出现在 {tab['port']} (实例{tab['agent_port']}) → "
+          f"控制台口 = {chain}; 登记值 = {old} ({'一致' if same else '不一致'})", flush=True)
+    if not write:
+        if not same:
+            print(f"{rig_name}: 未改登记; 加 --write 回写", flush=True)
+        return chain, tab
+    tgt["console"] = chain
+    tgt["console_bound_at"] = time.strftime("%Y-%m-%d %H:%M")
+    tgt["console_bound_by"] = "标记法(adb→console)"
+    if old and old != chain:
+        tgt["console_relocated_from"] = old
+    if rigs_path and all_rigs is not None:
+        save_rigs(rigs_path, all_rigs)
+    # boards.json: 板名条目跟着控制台口走(旧口上的同名条目删掉, 免得日后别的适配器插上去被冒名)
+    try:
+        bp = BOARDS_DEFAULT
+        b = json.load(open(bp, encoding="utf-8"))
+        name, sn = tgt.get("name"), tgt.get("adb_serial")
+        for k in [k for k in b if not k.startswith("_") and name and isinstance(b[k], dict)
+                  and b[k].get("name") == name and hub_chain(k) != chain]:
+            del b[k]
+        port = tab.get("port") or ""
+        key = port.rsplit("/", 1)[-1] if "by-path/" in port else None
+        if not key:
+            try:
+                key = next(e for e in os.listdir("/dev/serial/by-path") if hub_chain(e) == chain)
+            except (OSError, StopIteration):
+                key = None
+        if key:
+            entry = b.get(key) if isinstance(b.get(key), dict) else {}
+            entry["name"] = name
+            for f in ("adb_serial", "download_chain"):   # 与 rigs.json 保持同一份身份信息
+                if tgt.get(f):
+                    entry[f] = tgt[f]
+            entry["note"] = (f"rig 控制台口; {tgt['console_bound_at']} 标记法实证"
+                             f"(serial {str(sn)[:12]})" + (f", 由 {old} 挪来" if old and old != chain else ""))
+            b[key] = entry
+        json.dump(b, open(bp, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        open(bp, "a", encoding="utf-8").write("\n")
+    except Exception as e:
+        print(f"[warn] boards.json 同步失败: {e}", flush=True)
+    print(f"{rig_name}: ✔ 控制台登记 {old} → {chain}, 已写入 rigs/boards", flush=True)
+    return chain, tab
+
+
 def registry_sanity(rigs=None):
     """登记表自检: 找出物理上不可能/自相矛盾的登记, 返回问题列表(空=没问题)。
 
@@ -1226,7 +1408,17 @@ def main():
     name = args[0] if args[0] in rigs else None
     action = args[1] if name else args[0]
     if name is None:
-        # 无组合名: 只支持 status 广播
+        # 无组合名: status 广播 / online 在线检测
+        if action == "online":
+            rep_ = online_report(rigs=rigs)
+            if "--json" in args:
+                print(json.dumps(rep_, ensure_ascii=False, indent=1))
+            else:
+                if "--context" in args:      # SessionStart hook 用: 带说明头的注入文本
+                    print("【ZOps 板子在线状态 · 本机 hook 开局注入】这是开局时刻的快照, 之后插拔不会更新;"
+                          " 最新状态用: python3 " + os.path.abspath(__file__) + " online (或 MCP 工具 zops_rigs)")
+                print_online(rep_)
+            return
         if action != "status":
             raise RigError(2, f"未知组合 {args[0]!r}(现有: {', '.join(rigs)})")
         for n, r in rigs.items():
@@ -1263,6 +1455,8 @@ def main():
         act_catch_uboot(name, rig, select_usb="--menu" not in args)
     elif action == "bind-dl":
         act_bind_download(name, rig, rigs_path, rigs)
+    elif action == "bind-console":
+        act_bind_console(name, rig, rigs_path, rigs, write="--write" in args)
     elif action == "relocate":
         find_target_instance(name, rig, rigs_path, rigs) or relocate_console(name, rig, rigs_path, rigs)
     elif action == "verify":
@@ -1272,7 +1466,7 @@ def main():
         act_verify(name, rig, rigs_path, rigs, only=only,
                    recover="--recover" in args)
     else:
-        raise RigError(2, f"未知动作 {action!r}(status/on/off/coldboot/bind)")
+        raise RigError(2, f"未知动作 {action!r}(status/on/off/coldboot/bind/bind-dl/bind-console/relocate/verify)")
 
 
 if __name__ == "__main__":

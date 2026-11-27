@@ -153,6 +153,7 @@ def install(world, tmpdir):
     """把 rigctl 的硬件入口全部接到假世界。"""
     if not hasattr(main, "_orig"):
         main._orig = {k: getattr(R, k) for k in PATCHED}
+    R.BOARDS_DEFAULT = os.path.join(tmpdir, "boards.json")   # 绝不让测试写真实的 boards.json
     rigs = {
         "rig-A": {"controller": {"name": "治具", "console": "1.4.2", "baud": 115200,
                                  "power": {"method": "sysfs-gpio", "gpios": [196, 197, 388, 389],
@@ -664,6 +665,146 @@ def test_rig_in_mode_ownership(w):
     # 同口但序列号是别人的 → 不算
     R._rk_usb_by_chain = lambda: {"1.3": {"pid": "350b", "serial": "someoneelse0000"}}
     assert R._rig_in_mode(rigs["rig-B"], "350b") is False, "同口不同序列号被当成了本板"
+
+
+@case("hub 热插拔: 真实 udev 事件行能认出设备级条目; RK 设备集合变了才动作并落审计")
+def test_hub_hotplug(w):
+    import agent_hub as H
+    import tempfile as _tf
+    # 2026-11-27 用 sudo udevadm trigger 抓到的真实输出(--udev 模式没有 E: 属性行)
+    dev = "UDEV  [1894355.366344] change   /devices/pci0000:00/0000:00:08.1/0000:0c:00.3/usb3/3-1/3-1.4/3-1.4.3 (usb)\n"
+    iface = "UDEV  [1894355.367709] change   /devices/pci0000:00/0000:00:08.1/0000:0c:00.3/usb3/3-1/3-1.4/3-1.4.3/3-1.4.3:1.0 (usb)\n"
+    other = "UDEV  [1894355.368001] change   /devices/pci0000:00/0000:00:08.1/0000:0c:00.3/0000:0c:00.3:pcie010 (pci)\n"
+    m = H._UDEV_USB_DEV.match(dev)
+    assert m and m.group(1) == "3-1.4.3", f"设备级事件行没认出来: {m and m.group(1)}"
+    assert not H._UDEV_USB_DEV.match(iface), "接口级条目不该被当成设备级"
+    assert not H._UDEV_USB_DEV.match(other), "别的子系统不该被当成 usb 设备"
+    assert not H._UDEV_USB_DEV.match("UDEV - the event which udev sends out after rule processing\n")
+    # _on_rk_change: 现算 → 写审计 → 清缓存
+    audit = os.path.join(_tf.mkdtemp(), "audit.jsonl")
+    hub = H.Hub("127.0.0.1", 8300, 8321, 8400, audit_path=audit)
+    hub._rig_mod = lambda: R
+    hub._rigs_path = lambda: R.RIGS_DEFAULT        # 用用例的临时登记表, 不读真实的
+    hub.list_tabs = lambda: {"tabs": []}
+    _bind_all(w)
+    hub._usb_cache["rig-A"] = (1e18, "stale")          # 永不过期的脏缓存
+    hub._disc_cache = (1e18, "stale")
+    a = {"1.3": {"pid": "0006", "serial": w.boards["A"].serial}}
+    hub._on_rk_change({}, a)                           # A 上线
+    recs = [json.loads(l) for l in open(audit, encoding="utf-8")]
+    assert len(recs) == 1 and recs[0]["src"] == "udev", recs
+    assert "在线 rig-A" in recs[0]["action"] and "下线: 无" in recs[0]["action"], recs[0]
+    assert w.boards["A"].serial[:12] + "@1.3" in recs[0]["action"], recs[0]
+    assert hub._usb_cache == {} and hub._disc_cache is None, "热插拔后缓存没清"
+    # 换成一块没登记的板(同一个口) → 报未登记, 不冒充 A
+    hub._on_rk_change(a, {"1.3": {"pid": "350b", "serial": "unknown000001"}})
+    recs = [json.loads(l) for l in open(audit, encoding="utf-8")]
+    assert len(recs) == 2 and "未登记设备 1 个" in recs[1]["action"] and "离线 rig-A" in recs[1]["action"], recs[1]
+    assert "unknown00000@1.3(350b)" in recs[1]["action"], recs[1]     # 序列号截 12 位
+
+
+@case("online: 按 SoC 序列号认 rig; 换口/第三方板/拔线/Loader 态都不串台、不冒充")
+def test_online_report(w):
+    _bind_all(w)
+    rigs = R.load_rigs(R.RIGS_DEFAULT)
+    A, B = w.boards["A"], w.boards["B"]
+    tabs = [{"agent_port": 9000 + i, "port": f"pci-x-usb-0:{b.serial_port}:1.0-port0", "title": "t"}
+            for i, b in enumerate(sorted((A, B), key=lambda b: b.serial_port))]
+    rep = R.online_report(rigs=rigs, bus=w.rk_usb(), tabs=tabs)
+    by = {b["rig"]: b for b in rep["boards"]}
+    assert by["rig-A"]["online"] and by["rig-B"]["online"] and rep["unregistered"] == [], rep["summary"]
+    assert by["rig-A"]["serial"] == A.serial and by["rig-A"]["download_chain"] == A.dl_port
+    assert by["rig-B"]["serial"] == B.serial and by["rig-B"]["download_chain"] == B.dl_port
+    assert by["rig-A"]["console_instance"] is not None and by["rig-B"]["console_instance"] is not None
+    # 两块板的下载线对调: 结论跟序列号(板)走, 不跟口走
+    bus = {A.dl_port: {"pid": "0006", "serial": B.serial}, B.dl_port: {"pid": "0006", "serial": A.serial}}
+    by = {b["rig"]: b for b in R.online_report(rigs=rigs, bus=bus, tabs=tabs)["boards"]}
+    assert by["rig-A"]["download_chain"] == B.dl_port and by["rig-B"]["download_chain"] == A.dl_port
+    # 第三方 RK 板上线 → 进未登记清单, 不被任何 rig 认领
+    bus[A.dl_port] = {"pid": "0006", "serial": A.serial}
+    bus[B.dl_port] = {"pid": "0006", "serial": B.serial}
+    bus["1.4.1"] = {"pid": "0006", "serial": "deadbeefcafe0001"}
+    rep = R.online_report(rigs=rigs, bus=bus, tabs=tabs)
+    assert [u["serial"] for u in rep["unregistered"]] == ["deadbeefcafe0001"], rep
+    assert "未登记设备 1 个" in rep["summary"] and len(rep["boards"]) == 2
+    # A 拔线 → 离线: 不拿登记的下载口冒充实测, 也不去认别人的设备
+    del bus[A.dl_port]
+    by = {b["rig"]: b for b in R.online_report(rigs=rigs, bus=bus, tabs=tabs)["boards"]}
+    assert not by["rig-A"]["online"] and by["rig-A"]["download_chain"] is None and by["rig-A"]["mode"] is None
+    assert by["rig-B"]["online"]
+    # Loader / MaskROM 判型(3588=350b, 3576=350e)
+    bus2 = {A.dl_port: {"pid": "350b", "serial": A.serial}, B.dl_port: {"pid": "350e", "serial": B.serial}}
+    by = {b["rig"]: b for b in R.online_report(rigs=rigs, bus=bus2, tabs=tabs)["boards"]}
+    assert by["rig-A"]["mode"] == "loader" and by["rig-B"]["mode"] == "loader"
+    assert "Loader" in R.online_report(rigs=rigs, bus=bus2, tabs=tabs)["summary"]
+
+
+@case("bind-console: 标记只出现在本板控制台 → 回写该口、清旧口同名条目; 命中 0 个/只报告时都不改登记")
+def test_bind_console_nonce(w):
+    import types as _types
+    _bind_all(w)
+    rigs = R.load_rigs(R.RIGS_DEFAULT)
+    rig = rigs["rig-A"]
+    rig["target"]["console"] = "9.9"                       # 登记已过期(线被挪过)
+    R.save_rigs(R.RIGS_DEFAULT, rigs)
+    old_key = "pci-x-usb-0:9.9:1.0-port0"
+    json.dump({old_key: {"name": "3588 A"}, "_说明": "x"}, open(R.BOARDS_DEFAULT, "w"))
+    A = w.boards["A"]
+    inject, mode = {}, {"hit": True}
+
+    def fake_api(base, method, path, body=None, timeout=10):
+        ap = int(base.rsplit(":", 1)[1])
+        if path == "/api/info":
+            return {"ok": True, "data": {"capture_bytes": 100}}
+        if "/receive?offset=" in path:
+            txt = inject.get(ap, "")
+            inject[ap] = ""
+            return {"ok": True, "data": {"text": txt, "bytes": len(txt)}}
+        return {"ok": True, "data": {}}
+
+    def fake_run(cmd, **kw):
+        assert cmd[:4] == ["adb", "-s", A.serial, "shell"], cmd     # 必须打给**本 rig 登记的板**
+        marker = re.search(r"(echo __ZOPSC_\S+__)", cmd[4]).group(1)[5:]
+        if mode["hit"]:                        # 标记从板 A 的 console 出来 → 出现在它的串口实例
+            for t in R.hub_tabs():
+                if w.board_of_port(t["agent_port"]) is A:
+                    inject[t["agent_port"]] = inject.get(t["agent_port"], "") + marker
+        return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    R._api = fake_api
+    R.subprocess = _types.SimpleNamespace(run=fake_run)
+    snap = lambda: (open(R.RIGS_DEFAULT, encoding="utf-8").read(), open(R.BOARDS_DEFAULT, encoding="utf-8").read())
+    before = snap()
+    # ① 只报告: 不改任何文件
+    chain, tab = R.act_bind_console("rig-A", rig, write=False)
+    assert chain == A.serial_port and snap() == before, "只报告模式却改了登记"
+    # ② 命中 0 个(控制台线没接): 明确失败, 不改任何文件
+    mode["hit"] = False
+    try:
+        R.act_bind_console("rig-A", rig, R.RIGS_DEFAULT, rigs, write=True)
+        raise AssertionError("命中 0 个却没报错")
+    except SystemExit as e:
+        assert "命中 0 个" in str(e), e
+    assert snap() == before, "失败时却改了登记"
+    # ③ 命中: 回写控制台口; boards.json 旧口的同名条目删除、新口条目带上身份信息
+    mode["hit"] = True
+    chain, tab = R.act_bind_console("rig-A", rig, R.RIGS_DEFAULT, rigs, write=True)
+    assert chain == A.serial_port
+    new = R.load_rigs(R.RIGS_DEFAULT)["rig-A"]["target"]
+    assert new["console"] == A.serial_port and new["console_relocated_from"] == "9.9"
+    b = json.load(open(R.BOARDS_DEFAULT, encoding="utf-8"))
+    new_key = f"pci-0000:00:00.0-usb-0:{A.serial_port}:1.0-port0"   # = 实例上报的 by-path 文件名
+    assert old_key not in b and b["_说明"] == "x", b            # 旧口条目删了, 说明键没误伤
+    assert b[new_key]["name"] == "3588 A" and b[new_key]["adb_serial"] == A.serial
+    assert b[new_key]["download_chain"] == A.dl_port
+    # ④ 登记的板不在线 → 不发任何 adb, 直接报错
+    A.dl_port = None
+    R.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("板子不在线却发了 adb"))
+    try:
+        R.find_console_by_nonce(rig)
+        raise AssertionError("板子不在线却没报错")
+    except SystemExit as e:
+        assert "不在线" in str(e), e
 
 
 # ----------------------------------------------------------------- main
