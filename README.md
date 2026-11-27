@@ -277,6 +277,8 @@ python3 rigctl.py rig-A enter-loader      # 系统活着: 板型核对 → loade
 python3 rigctl.py rig-A catch-uboot       # 内核已死: 冷启动抢 U-Boot 菜单 → 选[3]进 Loader
 python3 rigctl.py rig-A bind              # 受控槽位重探测(关电盯谁灭→开电盯谁醒), 写回 rigs.json
 python3 rigctl.py rig-A bind-dl           # 绑定USB下载口(断电差分+二次复核), 会重启板子
+python3 rigctl.py online [--json|--context]    # 在线检测(只读): 现在哪些板在线、各是哪个台架的板
+python3 rigctl.py rig-A bind-console [--write]  # 不断电: 经 adb 让板子往 console 打标记, 核对/回写控制台口
 python3 rigctl.py rig-A verify            # 逐动作真跑+硬证据判定(off/on回读通道, coldboot看串口
                                           #   新增字节, loader类看lsusb 350b), 结果写 rigs.json
                                           #   的 verified, 网页按钮据此显示 ✓/✗/⚠
@@ -305,6 +307,31 @@ python3 rigctl.py --selftest
 * `adbq` 按名寻址走 `download_chain`（旧逻辑拿控制台口对 adb 口，只在两口同位时
   碰巧成立，已实测破产）；
 * 换线/挪线后拓扑会变，绑定是**快照不是永久事实**——挪过线重跑一次 `bind-dl` 即可。
+
+### 在线检测与三种触发（`rigctl online`）
+
+「现在哪些板在线、各是哪个台架的板」由 `rigctl online` 回答（只读、不动板子）。判据是
+**下载口上的 SoC 序列号**：等于某台架登记的 `adb_serial` → 该台架的板在线；不属于任何台架 →
+进 `unregistered`（只能报在线，叫不出是谁，认它要跑 `bind-dl`）；登记的序列号不在总线上 →
+离线。`--json` 给机器用，`--context` 输出带说明头的注入文本。
+
+同一个函数，三种触发：
+
+| 触发 | 何时 | 实现 |
+|---|---|---|
+| 按需现算 | AI 每次调用时 | MCP 工具 `zops_rigs` / `GET /api/rigs?fresh=1`（不吃缓存） |
+| 会话开局注入 | 每个 ZCode 新会话开局 | SessionStart hook `deploy/hooks/zops-session-inject.py`（装到 `~/.zcode/hooks/`，在 `config.json` 的 `hooks.events.SessionStart` 注册）；只注入开局快照，任何失败静默放行 |
+| 热插拔 | USB 上 RK 设备插/拔的瞬间 | hub 进程内订阅 `udevadm monitor`（普通用户即可，无需 root / udev 规则）；设备集合一变就现算、写一条审计、清缓存，面板下一轮轮询（≤5s）刷新 |
+
+状态条在有「未登记设备」时会多出一行。热插拔监听解析的是 udev **事件行**（该模式下 `udevadm`
+不打印属性行），回归用例用的是抓到的真实事件行。
+
+### 控制台口的不断电绑定（`bind-console`）
+
+`relocate` 靠断电重启板子来认控制台口。板子在运行态且 adb 可用时，`bind-console` 更温和：经
+下载口 adb 让板子往 `/dev/console` 打一个唯一标记，看哪个串口实例收到它——标记只可能从这块板
+的 console 出来。默认只报告，`--write` 才回写 `rigs.json` / `boards.json`（旧口的同名条目一并
+清掉）。命中 0 个会明确报错，不改登记。
 
 ### 进 Loader 与救砖（重要区别）
 
@@ -426,6 +453,7 @@ AI 直连实例端口（832x）可绕开审计——`AGENTS.md` 已将其列为�
 | **`logs/` 目录消失** | 外部清理 | `bash start_zops.sh`（会自动 `mkdir -p logs`） |
 | **进 Loader 没反应（系统已死）** | 内核没有 shell，in-system 命令必然无效 | 用 `rigctl rig-A catch-uboot` |
 | **`2207:0006` 但不是我那块板** | 总线上其它 RK 设备冒名 | `rigctl status` 按 **adb 序列号**认主，不信类型级匹配 |
+| 面板出现「未登记设备」/ 台架显示离线但板子明明接着 | 换过板或登记没跟上（SoC 序列号对不上） | `rigctl.py <台架名> bind-dl`（认下载口和序列号）→ `bind-console --write`（认控制台口） |
 
 ---
 
@@ -438,6 +466,9 @@ python flood_test.py            # 洪水压测：无损、账目守恒、日志�
 python smoke_test.py            # 命令与输入编辑冒烟测试
 python test_agent_http.py       # Agent 通道 20 项：对账/复读/双观察来源/AI 独立闭环/令牌/桥接
 python test_ui_smoke.py         # 网页冒烟：JS 语法(node --check)/函数重复定义/翻译器行为
+python3 test_topology.py         # 拓扑鲁棒性回归 27 场景(仿真, 不碰真设备)
+python3 test_property.py 300     # 属性测试: 随机接线世界, 验证恒成立性质
+python3 test_mutation.py         # 变异测试: 把核心判断改坏 29 处, 测试必须抓到
 python rigctl.py --selftest     # 链路归一化 / 节点解析 / 匹配
 python adbq.py --selftest       # 链路解析 / 重复序列号消歧 / 前缀歧义
 ```

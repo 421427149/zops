@@ -14,10 +14,11 @@
 | ZOps 网关不可用 / 脚本化 | `curl http://127.0.0.1:8300/api/...`（API 面 = README「AI Agent 通道」节）|
 | adb 操作板子 | `python3 adbq.py <板名> <adb子命令>`；**禁 adb 广播** |
 | 查谁是谁 | `curl http://127.0.0.1:8300/api/tabs`，看 title/board/hint 字段 |
+| **现在哪些板在线、各是哪个台架（rig）的板** | MCP 工具 `zops_rigs`（每次调用现扫 USB 总线，只读、不动板）；脚本 `python3 rigctl.py online [--json]`；或 `GET /api/rigs?fresh=1`。`unregistered` 非空 = 有设备在线但不属于任何台架（换过板/登记没跟上）——**别猜它是谁**，认它跑 `rigctl.py <台架名> bind-dl`（会重启该板）。新会话开局会自动注入一份快照；USB 插拔时 hub 自动刷新面板并写审计。**以现查为准，不以开局快照为准** |
 | 受控板电源/冷启动/进Loader | **一键接口** `POST /api/rigs/<组合名>/<on\|off\|coldboot\|enter-loader>`（人网页按钮走的就是它；动作异步执行，结果落在 `GET /api/rigs` 的 `last` 字段）；或命令行 `python3 rigctl.py <组合名> <同款动作>` |
 | **要刷机 / 需要知道"刷哪块板"** | 读 `GET /api/rigs` 每个 rig 的 **`flash`** 字段：`state`（`ready`=已在 Loader 可烧 / `system`=运行态，先 `enter-loader` / `offline`=下载线未接或板子没电 / `unbound`=未登记序列号）+ **`serial`**（烧录工具按它选设备）+ `download_chain`。**`flash.state=offline` 时不要烧**——那是线没接，不是软件问题；更不要退回"按类型找 2207"。面板按钮的 ✓/✗ 是**该次验证时刻**的结论，看它的 `at` 日期，✗ 的含义读 `evidence`（"未见 350b" 多半是当时下载线没接，不代表功能不存在） |
-| **`/api/rigs` 里某 rig 的 `target.tab=null` / `target.usb=null`** | **不要借用别的 tab、不要自己按 adb 序列号猜板**。`tab=null` = 登记的控制台口被挪走了 → 跑 `python3 rigctl.py <组合名> relocate`（电力差分+uptime 归零，自动回写，会重启该板）；`usb=null` = 该板 USB 下载线没接到主机（总线无其序列号）→ 属实，接线后再试。取串口与 USB **一律以 rig 名为准**（`rigs.json` 的 `target.adb_serial` 是差分实证的），不要手填 serial |
-| 绑定 USB 下载口 / 逐动作验证 | `python3 rigctl.py <组合名> bind-dl`（断电差分+二次复核，写 `download_chain`）；`python3 rigctl.py <组合名> verify`（按钮交付前必跑，硬证据写 `verified`） |
+| **`/api/rigs` 里某 rig 的 `target.tab=null` / `target.usb=null`** | **不要借用别的 tab、不要自己按 adb 序列号猜板**。`tab=null` = 登记的控制台口被挪走了 → 能 adb 进该板时优先 `python3 rigctl.py <组合名> bind-console --write`（标记法，不断电）；不行再 `relocate`（电力差分，会重启该板）；`usb=null` = 该板 USB 下载线没接到主机（总线无其序列号）→ 属实，接线后再试。取串口与 USB **一律以 rig 名为准**（`rigs.json` 的 `target.adb_serial` 是差分实证的），不要手填 serial |
+| 绑定 USB 下载口 / 逐动作验证 | `python3 rigctl.py <组合名> bind-dl`（断电差分+二次复核，写 `download_chain`）；`python3 rigctl.py <组合名> verify`（按钮交付前必跑，硬证据写 `verified`）；`bind-console [--write]`（标记法核对/回写控制台口，不断电） |
 | **内核已 panic / 卡死要救砖** | `python3 rigctl.py <组合名> catch-uboot`（冷启动+连发 Ctrl+C 抢 U-Boot 3 秒倒计时+菜单选 `[3] USB update images` 进 Loader）。**内核死了 in-system 的 `enter-loader` 必然无效**，只有 U-Boot 这条路；`--menu` 只停在菜单不选 |
 | 看组合(控制台/受控/USB)状态 | `GET /api/rigs`（控制器✔/受控✔/USB 模式一屏全览，AI 先看这个再动手）|
 
@@ -52,6 +53,10 @@
 11. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
    （`logs/hub_audit.jsonl`，主人用 `hub_audit_view.py` 实时围观）；直连 832x =
    绕开审计，等同私读。
+12. **经 adb / ssh 核查板子之前，先用 `zops_rigs` 拿到该台架的 `flash.serial`，`adb -s` 只打这个序列号**。
+    凭记忆或凭「总线上就它一个」去挑设备，会把一块板的结论安到另一块板头上（2026-11-26 实测：
+    在错的板上做完环回，得出「串口线断了」的错误结论）。`unregistered` 里的设备不属于任何台架，
+    别拿它当某某板用。
 
 ## 登记表（事实源；改文件即生效，hub/实例不用重启）
 
@@ -76,6 +81,11 @@
 serial-audit(审计镜像)。hub 常驻检查: `curl -s http://127.0.0.1:8300/api/status`。
 改 ZCode 的 MCP 配置需重启会话才生效。
 
+**板子换过/挪过线之后**：`zops_rigs` 会把它报成 `unregistered`（或该台架离线）。顺序：
+`rigctl.py <台架名> bind-dl`（电力差分，认下载口和序列号，重启该板两遍）→
+`rigctl.py <台架名> bind-console --write`（标记法认控制台口，不断电）。两步做完登记自洽
+（`rigctl.py --selftest` 会查同口/重复登记）。
+
 ## 自检（改码后必跑对应项再提交）
 
 ```bash
@@ -84,13 +94,13 @@ python3 test_agent_http.py        # 20 项, 自包含不碰真设备(只删自�
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
 python3 test_topology.py         # 拓扑鲁棒性回归(仿真, 不碰真设备, ~40s): 挪线/对调/拔板/换板/
-                                 #   没电/没shell/电源线改接/第三方板/Loader态/安静启动 共23场景
+                                 #   没电/没shell/电源线改接/第三方板/Loader态/安静启动/在线检测/热插拔 共27场景
 python3 test_property.py 300     # 属性测试(仿真, ~40s): 随机生成接线世界, 验证5条恒成立性质
                                  #   (不串台/按序列号追踪/离线不认领); 失败会打印最小复现步骤
 python3 test_mutation.py         # 变异测试(~10分钟, 提交 rigctl/adbq 的改动前跑): 把核心判断
-                                 #   改坏22处看测试能否抓到; 非等价变异必须全杀, 否则说明
+                                 #   改坏29处看测试能否抓到; 非等价变异必须全杀, 否则说明
                                  #   "测试全过但没测到" —— 新增/修改核心逻辑时同步加变异点
-python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为/选中标签高亮回归
+python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为/选中标签高亮/未登记设备行回归
 python3 serial_keeper.py --status # keeper 管理视图(实例缺失会自动补, 无需手动起)
 ```
 
