@@ -11,9 +11,10 @@ description: >-
 ZOps 是给 AI 用的多板调试操作台：抗洪水串口终端 + 聚合网关（hub，默认
 `http://127.0.0.1:8300`）+ 控电组合（rig）+ 按板名 adb。本技能是它的一条命令
 AI 入口，铁律已内建——只认板名、拒绝 ttyUSBx/COMx、长轮询不 sleep 死等、
-断电类操作不放行。命令本体 `{{ZOPS_CMD}}`（安装技能时按本机仓库位置自动填入），
-只依赖标准库，串口读写一律经 hub（铁律 11），可用 `--hub`/`ZOPS_HUB`、
-`--token`/`ZOPS_TOKEN` 指向别的网关。
+断电类操作不放行。命令本体 `{{ZOPS_CMD}}`、**这台机器的网关 `{{ZOPS_HUB}}`**（都是安装
+技能时按本机情况自动填入），只依赖标准库，串口读写一律经 hub（铁律 11）。
+示例命令都带 `--hub`：AI 会话常常拿不到新设的环境变量（桌面程序不重启就还是旧环境），
+别指望 `ZOPS_HUB` 一定看得见。换网关改 `--hub`，令牌用 `--token`/`ZOPS_TOKEN`。
 
 ## 什么时候用
 
@@ -27,13 +28,13 @@ AI 入口，铁律已内建——只认板名、拒绝 ttyUSBx/COMx、长轮询�
 
 ```bash
 # 1. 发命令并等特征：命中含 "Linux" 的行，最多等 10s；--json 供机器读
-{{ZOPS_CMD}} run --board "3588 A" --send "uname -a" --expect "Linux" --timeout 10 --json
+{{ZOPS_CMD}} run --board "3588 A" --send "uname -a" --expect "Linux" --timeout 10 --hub {{ZOPS_HUB}} --json
 
 # 2. 板子清单：title / hint / name_source / tab 序号 / rig / flash.state
-{{ZOPS_CMD}} boards --json
+{{ZOPS_CMD}} boards --hub {{ZOPS_HUB}} --json
 
 # 3. 只放行 on（幂等安全）；off/coldboot/enter-loader/catch-uboot/bind 一律被拒
-{{ZOPS_CMD}} rig rig-A on --json
+{{ZOPS_CMD}} rig rig-A on --hub {{ZOPS_HUB}} --json
 ```
 
 `run` 的 `--json` 一行：`ok / board / tab / matched / output / elapsed_ms /
@@ -51,8 +52,9 @@ reason / capture_consistent`。板名写错时 stderr 会列出当前可用板�
 
 ## 网关不通时怎么办
 
-1. 先 `curl http://<主机>:8300/api/status` 确认网关活着（不在本机就
-   `--hub http://<主机>:8300`）。
+1. 先 `curl {{ZOPS_HUB}}/api/status` 确认网关活着。网关换了地址就改用
+   `--hub http://<主机>:8300`，并重跑 `python3 deploy/install_skill.py --hub <新地址>`
+   更新本技能里写死的地址。
 2. **不要自己起串口实例，不要直连 832x 实例端口**——绕开网关 = 绕开审计（铁律 11）。
 3. 网关确实没起：如实报告给人，由人启动（`bash start_zops.sh`），不要代劳。
 
@@ -70,7 +72,7 @@ reason / capture_consistent`。板名写错时 stderr 会列出当前可用板�
   （铁律 12）：凭"总线上就它一个"去挑设备，会把一块板的结论安到另一块板上
   （11-26 实测踩过）。不属于任何台架的设备（`unregistered`）别当某某板用。
 - `boards` 读的是网关当前的登记。要**现扫**哪些板在线（插拔后的最新状态）：
-  `curl "<网关>/api/rigs?fresh=1"`；在接着板子的 Linux 主机上还可用 MCP 工具
+  `curl "{{ZOPS_HUB}}/api/rigs?fresh=1"`；在接着板子的 Linux 主机上还可用 MCP 工具
   `zops_rigs` 或 `rigctl.py online`。
 
 ## 完整契约

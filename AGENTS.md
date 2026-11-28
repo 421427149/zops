@@ -91,6 +91,10 @@ serial-audit(审计镜像)。hub 常驻检查: `curl -s http://127.0.0.1:8300/ap
 ```bash
 python3 check_code.py             # 语法 + 重复定义 + 拼接事故 + 内嵌JS  (改任何 py 后必跑)
 python3 test_agent_http.py        # 20 项, 自包含不碰真设备(只删自己造的临时 logs 文件)
+python3 test_zops_cli.py          # 一条命令入口 zops_cli.py(改它后必跑): loopback 假 hub 上验证
+                                 #   run/boards/rig 的退出码与 --json 字段, 不碰真设备
+python3 test_install_skill.py     # 技能安装器(改 deploy/install_skill.py 或 skills/zops 后必跑):
+                                 #   装进临时目录, 核对占位符都换成本机值(命令路径、网关地址)
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
 python3 test_topology.py         # 拓扑鲁棒性回归(仿真, 不碰真设备, ~40s): 挪线/对调/拔板/换板/

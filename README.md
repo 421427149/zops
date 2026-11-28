@@ -442,7 +442,8 @@ python3 zops_cli.py rig rig-A on --json    # 只放行 on；off/coldboot 等一�
   错误原因在 `reason`（`timeout/no_such_board/port_name_rejected/hub_unreachable/...`），
   板名不对时 stderr 列出当前可用板名。
 - 默认跳过所发命令的回显行再匹配，`--count-echo` 关闭；`capture_consistent=false` 原样带出不吞。
-- 给 AI 的自动发现技能见 `skills/zops/SKILL.md`（`deploy/install_skill.py` 装到本机技能目录）。
+- 给 AI 的自动发现技能见 `skills/zops/SKILL.md`（`deploy/install_skill.py` 装到本机技能目录；
+  网关不在本机时带 `--hub http://<主机>:8300`，地址会写进技能文件——AI 会话常拿不到新设的 `ZOPS_HUB`）。
 
 ### AI 活动审计与围观
 
