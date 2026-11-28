@@ -66,8 +66,14 @@ reason / capture_consistent`。板名写错时 stderr 会列出当前可用板�
   `off / coldboot / enter-loader / catch-uboot / bind` 需要人来做，或任务明确
   要求后走 `POST /api/rigs/<名>/<动作>`；`on` 幂等安全可放心。
 - `flash.state=offline` = 下载线没接或板子没电，**不要烧**，不是软件问题。
+- **经 adb / ssh 查板子之前，先拿到该台架的 `flash.serial`，`adb -s` 只打这个序列号**
+  （铁律 12）：凭"总线上就它一个"去挑设备，会把一块板的结论安到另一块板上
+  （11-26 实测踩过）。不属于任何台架的设备（`unregistered`）别当某某板用。
+- `boards` 读的是网关当前的登记。要**现扫**哪些板在线（插拔后的最新状态）：
+  `curl "<网关>/api/rigs?fresh=1"`；在接着板子的 Linux 主机上还可用 MCP 工具
+  `zops_rigs` 或 `rigctl.py online`。
 
 ## 完整契约
 
-仓库（`{{ZOPS_DIR}}`）根目录的 `AGENTS.md`（11 条铁律 + 自检清单），与本文冲突时以它为准。
+仓库（`{{ZOPS_DIR}}`）根目录的 `AGENTS.md`（12 条铁律 + 自检清单），与本文冲突时以它为准。
 adb 操作另有 `{{ZOPS_ADBQ}} <板名> <adb子命令>`（按板名寻址，禁广播）。
