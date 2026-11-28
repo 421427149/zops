@@ -16,6 +16,8 @@
        不能装出一份 AI 照抄会失败的技能);
     I7 目标目录正被别的程序打开着时重装仍然成功(仅 Windows): 2026-11-28 在工位机上
        "先删目录再复制"的旧做法删完就建不回来, ZCode 的技能当场丢失。
+    I8 技能是给在另一台机器上执行命令的 AI 看的: --dir / --cmd / --adbq 按命令实际执行的
+       那台机器写(DSH Super Agent 的工人在调试台 Linux 上跑命令, 技能文件却放在 Windows 上)。
 
 风格参考 test_zops_cli.py(check()/fails 计数, 末行打总结)。
 """
@@ -145,6 +147,28 @@ try:
     check("I6 残留占位符查得出来",
           len(left) == 1 and "ZOPS_SOMETHING_NEW" in left[0], str(left))
     check("I6 干净的副本查不出残留", install_skill.leftover_placeholders(t2) == [])
+
+    real.write("== I8 技能是给在另一台机器上执行命令的 AI 看的(--dir / --cmd / --adbq) ==\n")
+    t5 = os.path.join(tmp_root, "five", "zops")
+    remote_dir = "/custom_def/empty/串口工具"
+    remote_cmd = "python3 " + remote_dir + "/zops_cli.py"
+    remote_adbq = "python3 " + remote_dir + "/adbq.py"
+    local_cmd = install_skill.command_for(HERE, "zops_cli.py", "zops.cmd")
+    proc = run_install(t5, "--hub", "http://127.0.0.1:8300", "--dir", remote_dir,
+                       "--cmd", remote_cmd, "--adbq", remote_adbq)
+    text = skill_text(t5) if proc.returncode == 0 else ""
+    check("I8 退出码 0", proc.returncode == 0, brief(proc))
+    n_remote = text.count(remote_cmd + " ")
+    check("I8 三个示例命令换成命令实际执行的那台机器上的写法", n_remote == 3,
+          "实际 %d 处" % n_remote)
+    check("I8 不再出现安装技能这台机器上的路径", local_cmd not in text and HERE not in text)
+    check("I8 仓库目录和 adb 入口也换了",
+          ("仓库（`" + remote_dir + "`）") in text and (remote_adbq + " <板名>") in text)
+    check("I8 没有残留占位符", "{{" not in text)
+    proc = run_install(t5, "--cmd", "   ")
+    text = skill_text(t5) if proc.returncode == 0 else ""
+    check("I8 覆盖值只给空白算没给, 落回本机写法", proc.returncode == 0 and local_cmd in text,
+          brief(proc))
 
     real.write("== I7 目标目录正被别的程序打开着时重装(仅 Windows) ==\n")
     if os.name != "nt":

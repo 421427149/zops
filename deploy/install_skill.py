@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""install_skill.py —— 把 zops 技能装到本机 AI 技能目录（幂等，重复运行覆盖旧副本）。
+r"""install_skill.py —— 把 zops 技能装到本机 AI 技能目录（幂等，重复运行覆盖旧副本）。
 
 给各种 AI 入口（ZCode / Claude Code / Codex / DSH Super Agent worker）自动发现用：
 源是仓库里的 skills/zops（含 SKILL.md），目标默认 ~/.agents/skills/zops，
@@ -10,14 +10,21 @@
     python3 deploy/install_skill.py --target ~/.claude/skills/zops   # Claude Code
     python3 deploy/install_skill.py --target ~/.codex/skills/zops    # Codex
     python3 deploy/install_skill.py --hub http://192.168.1.167:8300  # 网关不在本机
+    python3 deploy/install_skill.py --target ~/.dsh/skills/zops \
+        --dir /custom_def/empty/串口工具 \
+        --cmd 'python3 /custom_def/empty/串口工具/zops_cli.py' \
+        --adbq 'python3 /custom_def/empty/串口工具/adbq.py'
+        # 技能是给"在另一台机器上执行命令"的 AI 看的：DSH Super Agent 的工人在远程工作区里
+        # 跑命令（调试台 Linux 主机），技能文件却放在本机（Windows）。这时目录和命令要按
+        # 命令实际执行的那台机器写，不能按安装技能的这台机器拼。
 
 只复制 skills/zops 目录本身，不动其他文件；无第三方依赖，不联网。
-复制后把 SKILL.md 里的占位符换成这台机器上的真实值——技能装到别处或别的机器上，
-示例里的相对路径和"默认网关"都不一定对：
-    {{ZOPS_DIR}}   本仓库所在目录
-    {{ZOPS_CMD}}   一条命令入口 zops_cli.py
-    {{ZOPS_ADBQ}}  按板名 adb 的 adbq.py
-    {{ZOPS_HUB}}   这台机器用的网关地址（--hub > 环境变量 ZOPS_HUB > 本机 8300）。
+复制后把 SKILL.md 里的占位符换成真实值——技能装到别处或别的机器上，示例里的
+相对路径和"默认网关"都不一定对：
+    {{ZOPS_DIR}}   仓库所在目录（--dir 覆盖）
+    {{ZOPS_CMD}}   一条命令入口 zops_cli.py（--cmd 覆盖）
+    {{ZOPS_ADBQ}}  按板名 adb 的 adbq.py（--adbq 覆盖）
+    {{ZOPS_HUB}}   网关地址（--hub > 环境变量 ZOPS_HUB > 本机 8300）。
                    写进技能而不只靠环境变量，是因为 AI 会话常常拿不到新设的环境变量
                    （桌面程序不重启就还是旧环境），示例命令里直接带 --hub 才稳。
 """
@@ -94,11 +101,17 @@ def sync_dir(src: str, dest: str) -> list:
     return stuck
 
 
-def fill_placeholders(dest: str, repo: str, hub: str = "") -> int:
+def _or_local(given: str, local: str) -> str:
+    """命令行给了就用给的（只有空白算没给），否则按本机拼。"""
+    return given.strip() if (given or "").strip() else local
+
+
+def fill_placeholders(dest: str, repo: str, hub: str = "", where: str = "",
+                      cmd: str = "", adbq: str = "") -> int:
     values = {
-        "{{ZOPS_DIR}}": repo,
-        "{{ZOPS_CMD}}": command_for(repo, "zops_cli.py", "zops.cmd"),
-        "{{ZOPS_ADBQ}}": command_for(repo, "adbq.py"),
+        "{{ZOPS_DIR}}": _or_local(where, repo),
+        "{{ZOPS_CMD}}": _or_local(cmd, command_for(repo, "zops_cli.py", "zops.cmd")),
+        "{{ZOPS_ADBQ}}": _or_local(adbq, command_for(repo, "adbq.py")),
         "{{ZOPS_HUB}}": hub_for(hub),
     }
     changed = 0
@@ -149,6 +162,11 @@ def main():
     parser.add_argument("--hub", default="", metavar="URL",
                         help="这台机器的 ZOps 网关地址，写进技能文件；默认取环境变量 ZOPS_HUB，"
                              "都没有则按网关在本机算（%s）" % DEFAULT_HUB)
+    remote_help = ("技能里的%s按命令实际执行的那台机器写；不给就按本仓库位置拼"
+                   "（技能是给在远程工作区里跑命令的 AI 看的时才需要）")
+    parser.add_argument("--dir", default="", metavar="DIR", help=remote_help % "仓库目录")
+    parser.add_argument("--cmd", default="", metavar="命令", help=remote_help % "一条命令入口")
+    parser.add_argument("--adbq", default="", metavar="命令", help=remote_help % "按板名 adb 的入口")
     args = parser.parse_args()
     dest = os.path.abspath(os.path.expanduser(args.target))
     hub = hub_for(args.hub)
@@ -157,11 +175,11 @@ def main():
     if parent:
         os.makedirs(parent, exist_ok=True)
     stuck = sync_dir(src, dest)
-    filled = fill_placeholders(dest, repo, hub)
+    filled = fill_placeholders(dest, repo, hub, args.dir, args.cmd, args.adbq)
     n_files = sum(len(filenames) for _root, _dirs, filenames in os.walk(dest))
     print("已安装 zops 技能: %s -> %s (%d 个文件，%d 个填好了本机路径)"
           % (src, dest, n_files, filled))
-    print("本机命令入口: %s" % command_for(repo, "zops_cli.py", "zops.cmd"))
+    print("技能里写的命令入口: %s" % _or_local(args.cmd, command_for(repo, "zops_cli.py", "zops.cmd")))
     print("本机网关地址: %s%s" % (hub, "" if hub_given else
                                 "（没给 --hub 也没设 ZOPS_HUB，按网关在本机算；不在本机就带 --hub 重装）"))
     left = leftover_placeholders(dest)
