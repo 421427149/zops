@@ -60,6 +60,40 @@ def command_for(repo: str, script: str, launcher_name: str = "") -> str:
     return 'python3 %s' % _quoted(os.path.join(repo, script))
 
 
+def sync_dir(src: str, dest: str) -> list:
+    """把 src 的内容同步到 dest：覆盖同名文件、删掉 dest 里多出来的，但不删 dest 目录本身。
+
+    不用"先 rmtree 再 copytree"：Windows 上目标目录正被别的程序打开着时（比如正在
+    运行的 AI 盯着技能目录），删掉后立刻重建会报"拒绝访问"——结果是旧技能没了、新的
+    也没装上（2026-11-28 在工位机上踩过）。先写新文件、后清旧文件，中途失败旧技能还在。
+    返回没删掉的旧文件（被占用），不影响新技能生效。
+    """
+    keep = set()
+    for root, _dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        target = dest if rel == os.curdir else os.path.join(dest, rel)
+        os.makedirs(target, exist_ok=True)
+        keep.add(os.path.normcase(target))
+        for name in files:
+            path = os.path.join(target, name)
+            shutil.copy2(os.path.join(root, name), path)
+            keep.add(os.path.normcase(path))
+    stuck = []
+    for root, dirs, files in os.walk(dest, topdown=False):
+        for name in files + dirs:
+            path = os.path.join(root, name)
+            if os.path.normcase(path) in keep:
+                continue
+            try:
+                if name in dirs:
+                    os.rmdir(path)          # 只删空目录；里面还有东西说明没删干净，留着
+                else:
+                    os.remove(path)
+            except OSError:
+                stuck.append(os.path.relpath(path, dest))
+    return stuck
+
+
 def fill_placeholders(dest: str, repo: str, hub: str = "") -> int:
     values = {
         "{{ZOPS_DIR}}": repo,
@@ -122,9 +156,7 @@ def main():
     parent = os.path.dirname(dest)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    if os.path.isdir(dest):
-        shutil.rmtree(dest)          # 幂等：先清旧副本再整目录复制，不留陈旧文件
-    shutil.copytree(src, dest)
+    stuck = sync_dir(src, dest)
     filled = fill_placeholders(dest, repo, hub)
     n_files = sum(len(filenames) for _root, _dirs, filenames in os.walk(dest))
     print("已安装 zops 技能: %s -> %s (%d 个文件，%d 个填好了本机路径)"
@@ -136,6 +168,8 @@ def main():
     if left:
         print("[ERROR] 技能里还有没替换的占位符: %s" % "; ".join(left), file=sys.stderr)
         return 2
+    if stuck:
+        print("[提示] 这些旧文件被占用没删掉，不影响使用: %s" % "; ".join(stuck), file=sys.stderr)
     print("重新打开 AI 会话后即可自动发现；触发词：串口/开发板/板子/UART/console/adb/哪块板在线")
     return 0
 

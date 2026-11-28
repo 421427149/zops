@@ -11,9 +11,11 @@
        并提示"网关不在本机就带 --hub 重装";
     I3 --hub 指定: 三个示例命令都带上这个地址(末尾斜杠不带入), 不再提示重装;
     I4 环境变量 ZOPS_HUB 生效; 同时给了 --hub 时以 --hub 为准;
-    I5 重复安装幂等: 上一次留下的多余文件被清掉;
+    I5 重复安装幂等: 上一次留下的多余文件/子目录被清掉, 目录本身不删;
     I6 残留占位符查得出来(技能里新增占位符而安装器不认识时, 安装必须报错,
-       不能装出一份 AI 照抄会失败的技能)。
+       不能装出一份 AI 照抄会失败的技能);
+    I7 目标目录正被别的程序打开着时重装仍然成功(仅 Windows): 2026-11-28 在工位机上
+       "先删目录再复制"的旧做法删完就建不回来, ZCode 的技能当场丢失。
 
 风格参考 test_zops_cli.py(check()/fails 计数, 末行打总结)。
 """
@@ -126,9 +128,15 @@ try:
     stale = os.path.join(t3, "stale-from-old-version.md")
     with open(stale, "w", encoding="utf-8") as handle:
         handle.write("旧版本留下的文件 {{ZOPS_CMD}}\n")
+    old_dir = os.path.join(t3, "old-subdir")
+    os.makedirs(old_dir)
+    with open(os.path.join(old_dir, "a.txt"), "w", encoding="utf-8") as handle:
+        handle.write("旧版本留下的子目录\n")
     proc = run_install(t3, "--hub", "http://192.168.1.167:8300")
     check("I5 重复安装成功且清掉旧副本的多余文件",
           proc.returncode == 0 and not os.path.exists(stale), brief(proc))
+    check("I5 旧副本里多出来的子目录也清掉", not os.path.exists(old_dir))
+    check("I5 清完之后技能文件还在且是对的", skill_text(t3).count("--hub http://192.168.1.167:8300 ") == 3)
 
     real.write("== I6 残留占位符 ==\n")
     with open(os.path.join(t3, "extra.md"), "w", encoding="utf-8") as handle:
@@ -137,6 +145,35 @@ try:
     check("I6 残留占位符查得出来",
           len(left) == 1 and "ZOPS_SOMETHING_NEW" in left[0], str(left))
     check("I6 干净的副本查不出残留", install_skill.leftover_placeholders(t2) == [])
+
+    real.write("== I7 目标目录正被别的程序打开着时重装(仅 Windows) ==\n")
+    if os.name != "nt":
+        real.write("  跳过(非 Windows)\n")
+    else:
+        import ctypes
+        from ctypes import wintypes
+        t4 = os.path.join(tmp_root, "four", "zops")
+        run_install(t4, "--hub", "http://192.168.1.167:8300")
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.restype = wintypes.HANDLE
+        create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        GENERIC_READ, SHARE_READ_WRITE, OPEN_EXISTING, BACKUP_SEMANTICS = 0x80000000, 0x3, 3, 0x02000000
+        # 打开目标目录且不给"共享删除": 这期间目录本身删不掉, 就像正在运行的 AI 盯着技能目录
+        handle = create_file(t4, GENERIC_READ, SHARE_READ_WRITE, None, OPEN_EXISTING,
+                             BACKUP_SEMANTICS, None)
+        locked = handle not in (None, 0, wintypes.HANDLE(-1).value)
+        try:
+            proc = run_install(t4, "--hub", "http://192.168.1.167:8300")
+            text = skill_text(t4) if os.path.isfile(os.path.join(t4, "SKILL.md")) else ""
+            check("I7 测试前提: 目录确实被锁住", locked)
+            check("I7 被占用时重装仍然成功, 技能文件完好",
+                  locked and proc.returncode == 0
+                  and text.count("--hub http://192.168.1.167:8300 ") == 3,
+                  brief(proc) + " | 技能文件长度 %d" % len(text))
+        finally:
+            if locked:
+                ctypes.windll.kernel32.CloseHandle(handle)
 finally:
     shutil.rmtree(tmp_root, ignore_errors=True)
 
