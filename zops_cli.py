@@ -16,7 +16,7 @@
 网关: 默认 http://127.0.0.1:8300, 可用 --hub 或环境变量 ZOPS_HUB 覆盖;
 令牌: --token 或环境变量 ZOPS_TOKEN。
 退出码: 0=等到/成功  1=超时未等到  2=环境或用法错误(网关不通/板名不认识/参数错)。
-完整契约见仓库 AGENTS.md(11 条铁律), 与本工具描述冲突时以 AGENTS.md 为准。
+完整契约见仓库 AGENTS.md(12 条铁律), 与本工具描述冲突时以 AGENTS.md 为准。
 """
 from __future__ import annotations
 
@@ -44,6 +44,11 @@ HUMAN_OUTPUT_CAP = 4000     # 人读模式下输出展示上限(超出取尾部)
 # 铁律3: 端口名重插即变号, 一律拒绝按它寻址(ttyUSB0/ttyACM0/ttyS2/ttyHS0/COM3, 可带 /dev/ 前缀)
 PORT_NAME_RE = re.compile(r"^(?:/dev/)?(?:tty(?:USB|ACM|HS|O|S)\d+|com\d+)$", re.IGNORECASE)
 FORBIDDEN_RIG_ACTIONS = ("off", "coldboot", "enter-loader", "catch-uboot", "bind")
+
+
+def self_command(sub: str) -> str:
+    """按"这次是怎么被调起来的"拼出一条能照抄的命令: 绝对路径, 换目录、换平台都能跑。"""
+    return '"%s" "%s" %s' % (sys.executable or "python", os.path.abspath(sys.argv[0]), sub)
 
 
 class CliError(Exception):
@@ -184,7 +189,7 @@ def cmd_run(args):
         return emit(EXIT_ENV, diag=[
             "✘ 拒绝按端口名 %r 寻址(铁律3: ttyUSBx/COMx 重插即重编号)" % board,
             "  当前可用板名: %s" % avail,
-            "  先 python3 zops_cli.py boards 看板名, 再按板名 run"])
+            "  先 %s 看板名, 再按板名 run" % self_command("boards")])
     # 铁律2: 只认板名(title)
     tab = next((t for t in tabs if (t.get("title") or "").strip() == board), None)
     if tab is None:

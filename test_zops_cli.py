@@ -334,6 +334,8 @@ for port_name in ("ttyUSB0", "COM3", "/dev/ttyACM0"):
           proc.returncode == 2 and j.get("reason") == "port_name_rejected",
           "rc=%s %s" % (proc.returncode, proc.stdout[:200]))
 check("T4 拒绝时也列出可用板名", "3588 A" in proc.stderr, proc.stderr[:300])
+check("T4 提示里的命令带绝对路径(换目录照抄也能跑)",
+      ('"%s" boards' % os.path.abspath(CLI)) in proc.stderr, proc.stderr[-300:])
 
 # ---------------------------------------------------------------- T5 网关不通
 real.write("== T5 网关不通 ==\n")
