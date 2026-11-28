@@ -11,7 +11,7 @@ description: >-
 ZOps 是给 AI 用的多板调试操作台：抗洪水串口终端 + 聚合网关（hub，默认
 `http://127.0.0.1:8300`）+ 控电组合（rig）+ 按板名 adb。本技能是它的一条命令
 AI 入口，铁律已内建——只认板名、拒绝 ttyUSBx/COMx、长轮询不 sleep 死等、
-断电类操作不放行。命令本体 `python3 zops_cli.py`（装进 PATH 后叫 `zops`），
+断电类操作不放行。命令本体 `{{ZOPS_CMD}}`（安装技能时按本机仓库位置自动填入），
 只依赖标准库，串口读写一律经 hub（铁律 11），可用 `--hub`/`ZOPS_HUB`、
 `--token`/`ZOPS_TOKEN` 指向别的网关。
 
@@ -27,13 +27,13 @@ AI 入口，铁律已内建——只认板名、拒绝 ttyUSBx/COMx、长轮询�
 
 ```bash
 # 1. 发命令并等特征：命中含 "Linux" 的行，最多等 10s；--json 供机器读
-python3 zops_cli.py run --board "3588 A" --send "uname -a" --expect "Linux" --timeout 10 --json
+{{ZOPS_CMD}} run --board "3588 A" --send "uname -a" --expect "Linux" --timeout 10 --json
 
 # 2. 板子清单：title / hint / name_source / tab 序号 / rig / flash.state
-python3 zops_cli.py boards --json
+{{ZOPS_CMD}} boards --json
 
 # 3. 只放行 on（幂等安全）；off/coldboot/enter-loader/catch-uboot/bind 一律被拒
-python3 zops_cli.py rig rig-A on --json
+{{ZOPS_CMD}} rig rig-A on --json
 ```
 
 `run` 的 `--json` 一行：`ok / board / tab / matched / output / elapsed_ms /
@@ -69,5 +69,5 @@ reason / capture_consistent`。板名写错时 stderr 会列出当前可用板�
 
 ## 完整契约
 
-仓库根目录 `AGENTS.md`（11 条铁律 + 自检清单），与本文冲突时以它为准。
-adb 操作另有 `python3 adbq.py <板名> <adb子命令>`（按板名寻址，禁广播）。
+仓库（`{{ZOPS_DIR}}`）根目录的 `AGENTS.md`（11 条铁律 + 自检清单），与本文冲突时以它为准。
+adb 操作另有 `{{ZOPS_ADBQ}} <板名> <adb子命令>`（按板名寻址，禁广播）。
